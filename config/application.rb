@@ -82,6 +82,15 @@ module ArbitrageBot
         lib/services/trackers/depth_history_collector
         lib/jobs/price_monitor_job
         lib/jobs/orderbook_analysis_job
+        lib/services/settings_loader
+        lib/services/safety/liquidity_checker
+        lib/services/safety/lagging_exchange_detector
+        lib/services/safety/signal_builder
+        lib/services/alerts/alert_formatter
+        lib/services/alerts/cooldown_manager
+        lib/services/alerts/blacklist
+        lib/services/telegram/telegram_notifier
+        lib/jobs/alert_job
       ]
 
       load_order.each do |file|
