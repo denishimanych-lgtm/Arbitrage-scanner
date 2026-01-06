@@ -1,0 +1,35 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require_relative '../config/application'
+ArbitrageBot.load!
+
+puts "Testing Adapters..."
+puts "=" * 50
+
+# Test CEX adapters
+puts "\n=== CEX Adapters ==="
+ArbitrageBot::Services::AdapterFactory::Cex.available.each do |name|
+  begin
+    adapter = ArbitrageBot::Services::AdapterFactory::Cex.for(name)
+    symbols = adapter.futures_symbols.first(3)
+    puts "  #{name}: OK (#{symbols.size} symbols sample)"
+  rescue => e
+    puts "  #{name}: ERROR - #{e.message}"
+  end
+end
+
+# Test Perp DEX adapters
+puts "\n=== Perp DEX Adapters ==="
+ArbitrageBot::Services::AdapterFactory::PerpDex.available.each do |name|
+  begin
+    adapter = ArbitrageBot::Services::AdapterFactory::PerpDex.for(name)
+    markets = adapter.markets.first(3)
+    puts "  #{name}: OK (#{markets.size} markets sample)"
+  rescue => e
+    puts "  #{name}: ERROR - #{e.message}"
+  end
+end
+
+puts "\n" + "=" * 50
+puts "Done!"

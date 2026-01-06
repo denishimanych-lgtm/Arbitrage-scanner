@@ -1,0 +1,14 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require_relative '../config/application'
+ArbitrageBot.load!
+
+puts "Starting Ticker Discovery Job..."
+puts "=" * 50
+
+job = ArbitrageBot::Jobs::TickerDiscoveryJob.new
+job.perform
+
+puts "=" * 50
+puts "Done!"
