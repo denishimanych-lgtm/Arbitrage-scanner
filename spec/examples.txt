@@ -1,0 +1,33 @@
+example_id                                         | status | run_time        |
+-------------------------------------------------- | ------ | --------------- |
+./spec/services/alert_formatter_spec.rb[1:1:1:1]   | passed | 0.00026 seconds |
+./spec/services/alert_formatter_spec.rb[1:1:2:1]   | passed | 0.00026 seconds |
+./spec/services/alert_formatter_spec.rb[1:1:3:1]   | passed | 0.00021 seconds |
+./spec/services/alert_formatter_spec.rb[1:2:1]     | passed | 0.00055 seconds |
+./spec/services/blacklist_spec.rb[1:1:1]           | passed | 0.00054 seconds |
+./spec/services/blacklist_spec.rb[1:1:2]           | passed | 0.00045 seconds |
+./spec/services/blacklist_spec.rb[1:1:3]           | passed | 0.0011 seconds  |
+./spec/services/blacklist_spec.rb[1:2:1]           | passed | 0.00051 seconds |
+./spec/services/blacklist_spec.rb[1:3:1]           | passed | 0.00054 seconds |
+./spec/services/blacklist_spec.rb[1:4:1]           | passed | 0.0009 seconds  |
+./spec/services/blacklist_spec.rb[1:4:2]           | passed | 0.00042 seconds |
+./spec/services/blacklist_spec.rb[1:4:3]           | passed | 0.00172 seconds |
+./spec/services/blacklist_spec.rb[1:4:4]           | passed | 0.00067 seconds |
+./spec/services/blacklist_spec.rb[1:5:1]           | passed | 0.00121 seconds |
+./spec/services/cooldown_manager_spec.rb[1:1:1]    | passed | 0.00032 seconds |
+./spec/services/cooldown_manager_spec.rb[1:1:2]    | passed | 0.00056 seconds |
+./spec/services/cooldown_manager_spec.rb[1:1:3]    | passed | 1.11 seconds    |
+./spec/services/cooldown_manager_spec.rb[1:1:4]    | passed | 0.00048 seconds |
+./spec/services/cooldown_manager_spec.rb[1:2:1]    | passed | 0.00035 seconds |
+./spec/services/cooldown_manager_spec.rb[1:2:2]    | passed | 0.00304 seconds |
+./spec/services/cooldown_manager_spec.rb[1:3:1]    | passed | 0.00051 seconds |
+./spec/services/cooldown_manager_spec.rb[1:3:2]    | passed | 0.00038 seconds |
+./spec/services/cooldown_manager_spec.rb[1:4:1]    | passed | 0.0007 seconds  |
+./spec/services/cooldown_manager_spec.rb[1:5:1]    | passed | 0.00111 seconds |
+./spec/services/liquidity_checker_spec.rb[1:1:1:1] | passed | 0.00256 seconds |
+./spec/services/liquidity_checker_spec.rb[1:1:2:1] | passed | 0.00128 seconds |
+./spec/services/liquidity_checker_spec.rb[1:1:3:1] | passed | 0.00038 seconds |
+./spec/services/liquidity_checker_spec.rb[1:1:4:1] | passed | 0.0004 seconds  |
+./spec/services/liquidity_checker_spec.rb[1:1:5:1] | passed | 0.00041 seconds |
+./spec/services/liquidity_checker_spec.rb[1:2:1]   | passed | 0.00022 seconds |
+./spec/services/liquidity_checker_spec.rb[1:2:2]   | passed | 0.00394 seconds |

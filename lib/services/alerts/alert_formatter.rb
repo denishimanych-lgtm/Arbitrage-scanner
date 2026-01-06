@@ -263,13 +263,13 @@ module ArbitrageBot
 
           price = price.to_f
           if price < 0.0001
-            format('%.8f', price)
+            sprintf('%.8f', price)
           elsif price < 1
-            format('%.6f', price)
+            sprintf('%.6f', price)
           elsif price < 100
-            format('%.4f', price)
+            sprintf('%.4f', price)
           else
-            format('%.2f', price)
+            sprintf('%.2f', price)
           end
         end
 

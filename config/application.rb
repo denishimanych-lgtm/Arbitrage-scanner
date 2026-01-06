@@ -90,7 +90,9 @@ module ArbitrageBot
         lib/services/alerts/cooldown_manager
         lib/services/alerts/blacklist
         lib/services/telegram/telegram_notifier
+        lib/services/telegram/bot
         lib/jobs/alert_job
+        lib/orchestrator
       ]
 
       load_order.each do |file|

@@ -1,0 +1,23 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# Alert Worker - Process signals and send alerts
+# Usage: bin/alert_worker
+
+require_relative '../config/application'
+ArbitrageBot.load!
+
+puts "Starting Alert Worker..."
+puts "Listening for signals on queue..."
+puts "Press Ctrl+C to stop"
+puts
+
+job = ArbitrageBot::Jobs::AlertJob.new
+
+trap('INT') do
+  puts "\nStopping..."
+  puts "Stats: #{job.stats}"
+  exit 0
+end
+
+job.run_loop

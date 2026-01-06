@@ -1,0 +1,23 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# Price Monitor - Continuous price collection
+# Usage: bin/price_monitor [interval]
+
+require_relative '../config/application'
+ArbitrageBot.load!
+
+interval = (ARGV[0] || 1).to_i
+
+puts "Starting Price Monitor (interval: #{interval}s)..."
+puts "Press Ctrl+C to stop"
+puts
+
+job = ArbitrageBot::Jobs::PriceMonitorJob.new
+
+trap('INT') do
+  puts "\nStopping..."
+  exit 0
+end
+
+job.run_loop(interval: interval)

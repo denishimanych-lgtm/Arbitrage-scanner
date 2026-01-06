@@ -1,0 +1,77 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# Main entry point for the Arbitrage Scanner
+# Usage: bin/scanner [options]
+#   --discovery-only  Run only ticker discovery
+#   --no-alerts       Disable alert sending
+#   --debug           Enable debug logging
+
+require_relative '../config/application'
+
+# Parse command line options
+options = {
+  discovery: true,
+  price_monitor: true,
+  alerts: true,
+  telegram_bot: true
+}
+
+ARGV.each do |arg|
+  case arg
+  when '--discovery-only'
+    options[:price_monitor] = false
+    options[:alerts] = false
+    options[:telegram_bot] = false
+  when '--no-alerts'
+    options[:alerts] = false
+  when '--no-telegram'
+    options[:telegram_bot] = false
+  when '--debug'
+    ArbitrageBot.logger.level = Logger::DEBUG
+  when '--help', '-h'
+    puts <<~HELP
+      Arbitrage Scanner - DEX/Futures Arbitrage Detection
+
+      Usage: bin/scanner [options]
+
+      Options:
+        --discovery-only  Run only ticker discovery (no monitoring)
+        --no-alerts       Disable alert sending to Telegram
+        --no-telegram     Disable Telegram bot commands
+        --debug           Enable debug logging
+        --help, -h        Show this help
+
+      Environment variables:
+        TELEGRAM_BOT_TOKEN  Telegram bot token
+        TELEGRAM_CHAT_ID    Target chat ID for alerts
+        REDIS_URL           Redis connection URL
+        APP_ENV             Environment (development/production)
+    HELP
+    exit 0
+  end
+end
+
+# Load application
+ArbitrageBot.load!
+
+# Create and start orchestrator
+orchestrator = ArbitrageBot::Orchestrator.new(options)
+
+# Handle signals
+trap('INT') do
+  puts "\nReceived INT signal, shutting down..."
+  orchestrator.shutdown
+  exit 0
+end
+
+trap('TERM') do
+  puts "\nReceived TERM signal, shutting down..."
+  orchestrator.shutdown
+  exit 0
+end
+
+# Start
+puts "Starting Arbitrage Scanner..."
+puts "Options: #{options.select { |_, v| v }.keys.join(', ')}"
+orchestrator.start

@@ -1,0 +1,22 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# Telegram Bot - Interactive command handler
+# Usage: bin/telegram_bot
+
+require_relative '../config/application'
+ArbitrageBot.load!
+
+puts "Starting Telegram Bot..."
+puts "Listening for commands..."
+puts "Press Ctrl+C to stop"
+puts
+
+bot = ArbitrageBot::Services::Telegram::Bot.new
+
+trap('INT') do
+  puts "\nStopping..."
+  exit 0
+end
+
+bot.run

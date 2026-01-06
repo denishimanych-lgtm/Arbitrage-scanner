@@ -1,0 +1,68 @@
+version: '3.8'
+
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  scanner:
+    build: .
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      - APP_ENV=production
+      - REDIS_URL=redis://redis:6379/0
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
+    volumes:
+      - ./log:/app/log
+      - ./config/settings.yml:/app/config/settings.yml:ro
+    restart: unless-stopped
+    command: ruby bin/scanner
+
+  # Optional: Run only discovery
+  discovery:
+    build: .
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      - APP_ENV=production
+      - REDIS_URL=redis://redis:6379/0
+    volumes:
+      - ./log:/app/log
+    profiles:
+      - discovery
+    command: ruby bin/discovery
+
+  # Optional: Separate alert worker
+  alert_worker:
+    build: .
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      - APP_ENV=production
+      - REDIS_URL=redis://redis:6379/0
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
+    volumes:
+      - ./log:/app/log
+    profiles:
+      - workers
+    restart: unless-stopped
+    command: ruby bin/alert_worker
+
+volumes:
+  redis_data:

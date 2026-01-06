@@ -1,0 +1,67 @@
+# SystemD Service File for Arbitrage Scanner
+# Install to: /etc/systemd/system/arbitrage-scanner.service
+#
+# Usage:
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable arbitrage-scanner
+#   sudo systemctl start arbitrage-scanner
+#   sudo systemctl status arbitrage-scanner
+#   journalctl -u arbitrage-scanner -f
+
+[Unit]
+Description=Crypto Arbitrage Scanner
+Documentation=https://github.com/denishimanych-lgtm/Arbitrage-scanner
+After=network-online.target redis.service
+Wants=network-online.target
+Requires=redis.service
+
+[Service]
+Type=simple
+
+# User and group
+User=scanner
+Group=scanner
+
+# Working directory
+WorkingDirectory=/opt/arbitrage-scanner
+
+# Environment
+Environment="APP_ENV=production"
+Environment="RACK_ENV=production"
+EnvironmentFile=/opt/arbitrage-scanner/.env
+
+# Ruby path (adjust for your setup)
+# For rbenv:
+# ExecStart=/home/scanner/.rbenv/shims/ruby /opt/arbitrage-scanner/bin/scanner
+# For system ruby:
+ExecStart=/usr/bin/ruby /opt/arbitrage-scanner/bin/scanner
+
+ExecStop=/bin/kill -INT $MAINPID
+ExecReload=/bin/kill -HUP $MAINPID
+
+# Restart policy
+Restart=always
+RestartSec=10
+StartLimitInterval=5min
+StartLimitBurst=4
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=arbitrage-scanner
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/arbitrage-scanner/log /opt/arbitrage-scanner/tmp
+
+# Resource limits
+LimitNOFILE=65536
+LimitNPROC=512
+MemoryMax=1G
+CPUQuota=200%
+
+[Install]
+WantedBy=multi-user.target

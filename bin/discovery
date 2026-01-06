@@ -1,0 +1,33 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# Ticker Discovery - Run once to collect all tickers
+# Usage: bin/discovery
+
+require_relative '../config/application'
+ArbitrageBot.load!
+
+puts "Starting Ticker Discovery..."
+puts "This will scan all exchanges and collect available symbols."
+puts
+
+job = ArbitrageBot::Jobs::TickerDiscoveryJob.new
+
+begin
+  result = job.perform
+
+  puts "\nDiscovery Complete!"
+  puts "=" * 50
+  puts "Symbols discovered: #{result[:symbols_count] || 'N/A'}"
+  puts "Arbitrage pairs generated: #{result[:pairs_count] || 'N/A'}"
+  puts "Duration: #{result[:duration_sec] || 'N/A'}s"
+
+  if result[:errors]&.any?
+    puts "\nErrors encountered:"
+    result[:errors].each { |e| puts "  - #{e}" }
+  end
+rescue StandardError => e
+  puts "Discovery failed: #{e.message}"
+  puts e.backtrace.first(10).join("\n")
+  exit 1
+end
