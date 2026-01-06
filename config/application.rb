@@ -68,6 +68,20 @@ module ArbitrageBot
         lib/services/adapter_factory
         lib/storage/ticker_storage
         lib/jobs/ticker_discovery_job
+        lib/services/price_fetcher/cex_price_fetcher
+        lib/services/price_fetcher/dex_price_fetcher
+        lib/services/price_fetcher/perp_dex_price_fetcher
+        lib/services/orderbook/cex_orderbook_fetcher
+        lib/services/orderbook/dex_depth_fetcher
+        lib/services/orderbook/perp_dex_orderbook_fetcher
+        lib/services/calculators/executable_price_calculator
+        lib/services/calculators/spread_calculator
+        lib/services/calculators/depth_calculator
+        lib/services/trackers/timing_data
+        lib/services/trackers/spread_age_tracker
+        lib/services/trackers/depth_history_collector
+        lib/jobs/price_monitor_job
+        lib/jobs/orderbook_analysis_job
       ]
 
       load_order.each do |file|
