@@ -50,11 +50,8 @@ module ArbitrageBot
         thread.kill if thread.alive?
       end
 
-      # Save stats
-      save_stats
-
-      # Close Redis connections
-      @redis.quit rescue nil
+      # Save stats (in a thread to avoid trap context issues)
+      Thread.new { save_stats rescue nil }.join(2)
 
       log('Shutdown complete')
     end

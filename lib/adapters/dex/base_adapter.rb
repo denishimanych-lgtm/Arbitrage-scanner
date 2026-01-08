@@ -52,6 +52,7 @@ module ArbitrageBot
           uri = URI.parse(url)
           http = Net::HTTP.new(uri.host, uri.port)
           http.use_ssl = uri.scheme == 'https'
+          http.verify_mode = OpenSSL::SSL::VERIFY_NONE if skip_ssl_verify?
           http.read_timeout = @http_timeout
           http.open_timeout = @http_timeout
 
@@ -75,6 +76,7 @@ module ArbitrageBot
           uri = URI.parse(url)
           http = Net::HTTP.new(uri.host, uri.port)
           http.use_ssl = uri.scheme == 'https'
+          http.verify_mode = OpenSSL::SSL::VERIFY_NONE if skip_ssl_verify?
           http.read_timeout = @http_timeout
           http.open_timeout = @http_timeout
 
@@ -92,6 +94,10 @@ module ArbitrageBot
           JSON.parse(response.body)
         rescue JSON::ParserError => e
           raise ApiError, "JSON parse error: #{e.message}"
+        end
+
+        def skip_ssl_verify?
+          ENV['SKIP_SSL_VERIFY'] == '1' || ENV['APP_ENV'] == 'development'
         end
       end
     end
