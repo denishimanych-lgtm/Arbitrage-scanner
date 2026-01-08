@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require 'net/http'
+require 'openssl'
 require 'json'
 
 module ArbitrageBot
@@ -65,7 +66,7 @@ module ArbitrageBot
             allowed_updates: ['message']
           )
 
-          response = Net::HTTP.get_response(uri)
+          response = http_get(uri)
           result = JSON.parse(response.body)
 
           return [] unless result['ok']
@@ -370,13 +371,37 @@ module ArbitrageBot
         def send_message(chat_id, text)
           uri = URI("https://api.telegram.org/bot#{@token}/sendMessage")
 
-          Net::HTTP.post_form(uri, {
+          http = Net::HTTP.new(uri.host, uri.port)
+          http.use_ssl = true
+          http.verify_mode = OpenSSL::SSL::VERIFY_NONE if skip_ssl_verify?
+          http.read_timeout = 10
+          http.open_timeout = 10
+
+          request = Net::HTTP::Post.new(uri.request_uri)
+          request.set_form_data(
             chat_id: chat_id,
             text: text,
             disable_web_page_preview: true
-          })
+          )
+
+          http.request(request)
         rescue StandardError => e
           @logger.error("[TelegramBot] Send failed: #{e.message}")
+        end
+
+        def http_get(uri)
+          http = Net::HTTP.new(uri.host, uri.port)
+          http.use_ssl = true
+          http.verify_mode = OpenSSL::SSL::VERIFY_NONE if skip_ssl_verify?
+          http.read_timeout = POLL_TIMEOUT + 5
+          http.open_timeout = 10
+
+          request = Net::HTTP::Get.new(uri.request_uri)
+          http.request(request)
+        end
+
+        def skip_ssl_verify?
+          ENV['SKIP_SSL_VERIFY'] == '1' || ENV['APP_ENV'] == 'development'
         end
 
         def load_alert_stats

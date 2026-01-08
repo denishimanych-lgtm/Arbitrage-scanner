@@ -205,7 +205,7 @@ module ArbitrageBot
         yaml_path = File.join(ArbitrageBot.root, 'config', 'settings.yml')
         return unless File.exist?(yaml_path)
 
-        yaml_settings = YAML.load_file(yaml_path)
+        yaml_settings = YAML.load_file(yaml_path, aliases: true)
         env_settings = yaml_settings[ArbitrageBot.env] || yaml_settings['default'] || {}
 
         env_settings.each do |key, value|
