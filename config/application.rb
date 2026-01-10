@@ -59,6 +59,7 @@ module ArbitrageBot
     def require_all
       # Load in order: base classes first, then implementations
       load_order = %w[
+        lib/support/ssl_config
         lib/adapters/cex/base_adapter
         lib/adapters/dex/base_adapter
         lib/adapters/perp_dex/base_adapter

@@ -66,11 +66,7 @@ module ArbitrageBot
 
         def get(url, headers: {})
           uri = URI.parse(url)
-          http = Net::HTTP.new(uri.host, uri.port)
-          http.use_ssl = uri.scheme == 'https'
-          http.verify_mode = OpenSSL::SSL::VERIFY_NONE if skip_ssl_verify?
-          http.read_timeout = @http_timeout
-          http.open_timeout = @http_timeout
+          http = Support::SslConfig.create_http(uri, timeout: @http_timeout)
 
           request = Net::HTTP::Get.new(uri.request_uri)
           headers.each { |k, v| request[k] = v }
@@ -94,10 +90,6 @@ module ArbitrageBot
 
         def extract_base_asset(symbol)
           symbol.to_s.upcase.gsub(/USDT$|USDC$|USD$|BUSD$/, '')
-        end
-
-        def skip_ssl_verify?
-          ENV['SKIP_SSL_VERIFY'] == '1' || ENV['APP_ENV'] == 'development'
         end
       end
     end

@@ -1,7 +1,6 @@
 # frozen_string_literal: true
 
 require 'net/http'
-require 'openssl'
 require 'json'
 
 module ArbitrageBot
@@ -318,11 +317,7 @@ module ArbitrageBot
 
         begin
           uri = URI.parse(url)
-          http = Net::HTTP.new(uri.host, uri.port)
-          http.use_ssl = true
-          http.verify_mode = OpenSSL::SSL::VERIFY_NONE if skip_ssl_verify?
-          http.read_timeout = @http_timeout
-          http.open_timeout = @http_timeout
+          http = Support::SslConfig.create_http(uri, timeout: @http_timeout)
 
           request = Net::HTTP::Get.new(uri.request_uri)
           headers.each { |k, v| request[k] = v }
@@ -364,10 +359,6 @@ module ArbitrageBot
 
       # Custom error class for retryable errors
       class RetryableError < StandardError; end
-
-      def skip_ssl_verify?
-        ENV['SKIP_SSL_VERIFY'] == '1' || ENV['APP_ENV'] == 'development'
-      end
 
       def log(message, level = :info)
         case level

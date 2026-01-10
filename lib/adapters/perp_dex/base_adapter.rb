@@ -53,11 +53,7 @@ module ArbitrageBot
 
         def get(url, headers: {})
           uri = URI.parse(url)
-          http = Net::HTTP.new(uri.host, uri.port)
-          http.use_ssl = uri.scheme == 'https'
-          http.verify_mode = OpenSSL::SSL::VERIFY_NONE if skip_ssl_verify?
-          http.read_timeout = @http_timeout
-          http.open_timeout = @http_timeout
+          http = Support::SslConfig.create_http(uri, timeout: @http_timeout)
 
           request = Net::HTTP::Get.new(uri.request_uri)
           headers.each { |k, v| request[k] = v }
@@ -77,11 +73,7 @@ module ArbitrageBot
 
         def post(url, body:, headers: {})
           uri = URI.parse(url)
-          http = Net::HTTP.new(uri.host, uri.port)
-          http.use_ssl = uri.scheme == 'https'
-          http.verify_mode = OpenSSL::SSL::VERIFY_NONE if skip_ssl_verify?
-          http.read_timeout = @http_timeout
-          http.open_timeout = @http_timeout
+          http = Support::SslConfig.create_http(uri, timeout: @http_timeout)
 
           request = Net::HTTP::Post.new(uri.request_uri)
           request['Content-Type'] = 'application/json'
@@ -101,10 +93,6 @@ module ArbitrageBot
 
         def normalize_symbol(symbol)
           symbol.to_s.upcase.gsub(/[-_\/]/, '')
-        end
-
-        def skip_ssl_verify?
-          ENV['SKIP_SSL_VERIFY'] == '1' || ENV['APP_ENV'] == 'development'
         end
       end
     end
