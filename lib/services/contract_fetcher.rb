@@ -307,25 +307,63 @@ module ArbitrageBot
         @redis.expire('contracts:cache', 604800)
       end
 
-      def get_json(url, headers: {})
-        uri = URI.parse(url)
-        http = Net::HTTP.new(uri.host, uri.port)
-        http.use_ssl = true
-        http.verify_mode = OpenSSL::SSL::VERIFY_NONE if skip_ssl_verify?
-        http.read_timeout = @http_timeout
-        http.open_timeout = @http_timeout
+      # HTTP GET with retry logic and exponential backoff
+      # @param url [String] URL to fetch
+      # @param headers [Hash] HTTP headers
+      # @param max_retries [Integer] Maximum number of retry attempts
+      # @param base_delay [Float] Base delay in seconds for exponential backoff
+      # @return [Hash, Array] Parsed JSON response
+      def get_json(url, headers: {}, max_retries: 3, base_delay: 1.0)
+        retries = 0
 
-        request = Net::HTTP::Get.new(uri.request_uri)
-        headers.each { |k, v| request[k] = v }
+        begin
+          uri = URI.parse(url)
+          http = Net::HTTP.new(uri.host, uri.port)
+          http.use_ssl = true
+          http.verify_mode = OpenSSL::SSL::VERIFY_NONE if skip_ssl_verify?
+          http.read_timeout = @http_timeout
+          http.open_timeout = @http_timeout
 
-        response = http.request(request)
+          request = Net::HTTP::Get.new(uri.request_uri)
+          headers.each { |k, v| request[k] = v }
 
-        unless response.is_a?(Net::HTTPSuccess)
-          raise "HTTP #{response.code}: #{response.body[0..200]}"
+          response = http.request(request)
+
+          # Handle retryable HTTP errors
+          if retryable_error?(response)
+            raise RetryableError, "HTTP #{response.code}"
+          end
+
+          unless response.is_a?(Net::HTTPSuccess)
+            raise "HTTP #{response.code}: #{response.body[0..200]}"
+          end
+
+          JSON.parse(response.body)
+
+        rescue RetryableError, Net::OpenTimeout, Net::ReadTimeout, Timeout::Error, Errno::ECONNRESET, Errno::ECONNREFUSED => e
+          retries += 1
+
+          if retries <= max_retries
+            delay = base_delay * (2**(retries - 1)) + rand(0.0..0.5) # Exponential backoff with jitter
+            log("Retry #{retries}/#{max_retries} after #{delay.round(1)}s: #{e.message}", :warn)
+            sleep(delay)
+            retry
+          else
+            log("Max retries (#{max_retries}) exceeded for #{url}", :error)
+            raise
+          end
         end
-
-        JSON.parse(response.body)
       end
+
+      # Check if HTTP response is retryable
+      def retryable_error?(response)
+        code = response.code.to_i
+        # Retry on: 429 (rate limit), 500, 502, 503, 504 (server errors)
+        [429, 500, 502, 503, 504].include?(code)
+      end
+
+      # Custom error class for retryable errors
+      class RetryableError < StandardError; end
 
       def skip_ssl_verify?
         ENV['SKIP_SSL_VERIFY'] == '1' || ENV['APP_ENV'] == 'development'

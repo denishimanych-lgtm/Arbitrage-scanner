@@ -10,8 +10,8 @@ module ArbitrageBot
           keyword_init: true
         )
 
-        # Standard quote amounts in USD
-        QUOTE_AMOUNTS_USD = [100, 500, 1000, 2500, 5000, 10_000].freeze
+        # Default quote amounts in USD (can be overridden via settings)
+        DEFAULT_QUOTE_AMOUNTS_USD = [100, 500, 1000, 2500, 5000, 10_000].freeze
 
         # USDC decimals by chain
         USDC_DECIMALS = {
@@ -22,8 +22,9 @@ module ArbitrageBot
           'avalanche' => 6
         }.freeze
 
-        def initialize
+        def initialize(settings = {})
           @adapters = {}
+          @quote_amounts_usd = settings[:dex_quote_amounts_usd] || DEFAULT_QUOTE_AMOUNTS_USD
         end
 
         # Fetch price for a token on a specific DEX
@@ -62,7 +63,7 @@ module ArbitrageBot
           chain = adapter.chain
           received_at = (Time.now.to_f * 1000).to_i
 
-          depth_data = QUOTE_AMOUNTS_USD.map do |amount_usd|
+          depth_data = @quote_amounts_usd.map do |amount_usd|
             begin
               amount = usd_to_base_units(amount_usd, chain)
 

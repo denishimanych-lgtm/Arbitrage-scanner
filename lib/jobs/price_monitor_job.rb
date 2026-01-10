@@ -18,7 +18,7 @@ module ArbitrageBot
         @max_price_age_ms = settings[:max_price_age_ms] || DEFAULT_MAX_PRICE_AGE_MS
 
         @cex_fetcher = Services::PriceFetcher::CexPriceFetcher.new
-        @dex_fetcher = Services::PriceFetcher::DexPriceFetcher.new
+        @dex_fetcher = Services::PriceFetcher::DexPriceFetcher.new(@settings)
         @perp_dex_fetcher = Services::PriceFetcher::PerpDexPriceFetcher.new
         @ticker_storage = Storage::TickerStorage.new
         @stale_count = 0

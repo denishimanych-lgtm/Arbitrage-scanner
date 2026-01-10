@@ -76,6 +76,12 @@ default: &default
     - bsc
     - arbitrum
 
+  # === Orderbook Analysis ===
+  orderbook_depth: 20  # Number of orderbook levels to fetch
+
+  # === DEX Price Fetcher ===
+  dex_quote_amounts_usd: [100, 500, 1000, 2500, 5000, 10000]
+
   # === System ===
   price_update_interval_sec: 1
   ticker_discovery_interval_hours: 24

@@ -105,7 +105,7 @@ module ArbitrageBot
 
       def fetch_orderbook(venue)
         type = (venue['type'] || venue[:type]).to_sym
-        depth = 20
+        depth = @settings[:orderbook_depth] || 20
 
         case type
         when :cex_futures, :cex_spot

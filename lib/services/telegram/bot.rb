@@ -13,6 +13,10 @@ module ArbitrageBot
 
         attr_reader :token, :chat_id, :orchestrator
 
+        # Rate limiting settings
+        DEFAULT_COMMAND_COOLDOWN_SEC = 1.0  # Min seconds between commands per user
+        MAX_COMMANDS_PER_MINUTE = 30        # Max commands per user per minute
+
         def initialize(orchestrator: nil)
           @token = ENV['TELEGRAM_BOT_TOKEN']
           @chat_id = ENV['TELEGRAM_CHAT_ID']
@@ -22,6 +26,10 @@ module ArbitrageBot
           @running = false
           @offset = 0
           @paused = false
+
+          # Rate limiting state
+          @user_last_command = {}  # chat_id => last_command_time
+          @user_command_count = {} # chat_id => [timestamps in last minute]
 
           # Initialize helpers
           @settings_loader = SettingsLoader.new
@@ -91,6 +99,12 @@ module ArbitrageBot
             return
           end
 
+          # Check rate limit
+          unless check_rate_limit(chat_id)
+            send_message(chat_id, "⏱ Too many commands. Please wait a moment.")
+            return
+          end
+
           # Parse command
           parts = text.split(' ')
           command = parts[0].delete_prefix('/').split('@').first
@@ -103,6 +117,36 @@ module ArbitrageBot
         def authorized?(chat_id)
           allowed = (@chat_id || '').split(',').map(&:strip)
           allowed.include?(chat_id.to_s)
+        end
+
+        # Check if user is within rate limits
+        # @param chat_id [Integer, String] User's chat ID
+        # @return [Boolean] true if allowed, false if rate limited
+        def check_rate_limit(chat_id)
+          now = Time.now
+
+          # Check cooldown between commands
+          last_command = @user_last_command[chat_id]
+          if last_command && (now - last_command) < DEFAULT_COMMAND_COOLDOWN_SEC
+            @logger.debug("[TelegramBot] Rate limit: command cooldown for #{chat_id}")
+            return false
+          end
+
+          # Check commands per minute limit
+          @user_command_count[chat_id] ||= []
+          # Remove timestamps older than 60 seconds
+          @user_command_count[chat_id].reject! { |t| now - t > 60 }
+
+          if @user_command_count[chat_id].size >= MAX_COMMANDS_PER_MINUTE
+            @logger.warn("[TelegramBot] Rate limit: max commands/min exceeded for #{chat_id}")
+            return false
+          end
+
+          # Record this command
+          @user_last_command[chat_id] = now
+          @user_command_count[chat_id] << now
+
+          true
         end
 
         def handle_command(chat_id, command, args)
