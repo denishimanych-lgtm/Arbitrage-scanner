@@ -111,25 +111,24 @@ module ArbitrageBot
       def fetch_contract_addresses
         log('Fetching contract addresses...')
 
-        # Use one exchange (Binance preferred) to get contract addresses
-        adapter = Services::AdapterFactory::Cex.get('binance')
+        fetcher = Services::ContractFetcher.new
 
-        @tickers.each do |symbol, ticker|
-          begin
-            details = adapter.asset_details(symbol)
-            next unless details
+        unless fetcher.configured?
+          log('No API keys for contract fetching (COINGECKO_API_KEY or COINMARKETCAP_API_KEY)')
+          log('Skipping contract addresses - DEX lookup will be unavailable')
+          return
+        end
 
-            details[:networks]&.each do |network|
-              next unless network[:contract]
+        # Fetch contracts for all symbols
+        symbols = @tickers.keys
+        contracts = fetcher.fetch_batch(symbols)
 
-              ticker.add_contract(
-                chain: network[:chain],
-                address: network[:contract]
-              )
-            end
-          rescue StandardError => e
-            # Log only at debug level - many assets won't have contract info
-            @logger.debug("Contract fetch error for #{symbol}: #{e.message}")
+        # Add contracts to tickers
+        contracts.each do |symbol, chains|
+          next unless @tickers[symbol]
+
+          chains.each do |chain, address|
+            @tickers[symbol].add_contract(chain: chain, address: address)
           end
         end
 

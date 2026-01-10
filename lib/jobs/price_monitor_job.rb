@@ -16,6 +16,7 @@ module ArbitrageBot
         @min_spread_pct = settings[:min_spread_pct] || 1.0
 
         @cex_fetcher = Services::PriceFetcher::CexPriceFetcher.new
+        @dex_fetcher = Services::PriceFetcher::DexPriceFetcher.new
         @perp_dex_fetcher = Services::PriceFetcher::PerpDexPriceFetcher.new
         @ticker_storage = Storage::TickerStorage.new
       end
@@ -86,6 +87,13 @@ module ArbitrageBot
           @logger.error("CEX price fetch error: #{e.message}")
         end
 
+        # Fetch DEX prices for tokens with contracts
+        begin
+          fetch_dex_prices(symbols, prices)
+        rescue StandardError => e
+          @logger.error("DEX price fetch error: #{e.message}")
+        end
+
         # Fetch Perp DEX prices
         begin
           perp_prices = @perp_dex_fetcher.fetch_all_dexes
@@ -100,6 +108,41 @@ module ArbitrageBot
         end
 
         prices
+      end
+
+      def fetch_dex_prices(symbols, prices)
+        symbols.each do |symbol|
+          ticker = @ticker_storage.get(symbol)
+          next unless ticker
+
+          # Skip if no DEX venues
+          dex_venues = ticker.venues[:dex_spot] || []
+          next if dex_venues.empty?
+
+          dex_venues.each do |venue|
+            dex = venue[:dex]
+            chain = venue[:chain]
+            token_address = ticker.contracts[chain]
+
+            next unless token_address
+
+            begin
+              price_data = @dex_fetcher.fetch(dex, token_address)
+              next unless price_data
+
+              base = symbol.upcase
+              prices["#{dex}:#{base}"] = {
+                bid: price_data.price,
+                ask: price_data.price,
+                last: price_data.price,
+                price_impact_pct: price_data.price_impact_pct,
+                received_at: price_data.received_at
+              }
+            rescue StandardError => e
+              @logger.debug("DEX price fetch error for #{symbol}/#{dex}: #{e.message}")
+            end
+          end
+        end
       end
 
       def cache_prices(prices)

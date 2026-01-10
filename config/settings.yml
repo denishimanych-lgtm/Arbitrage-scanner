@@ -23,7 +23,12 @@ default: &default
   max_slippage_pct: 2.0
   max_latency_ms: 5000
   max_spread_age_sec: 60
+  max_spread_age_hours: 24
   min_depth_vs_history_ratio: 0.3
+  warning_depth_ratio: 0.5
+  max_position_to_exit_ratio: 0.5
+  max_bid_ask_spread_pct: 1.0
+  min_history_samples: 10
 
   # === Alert Cooldowns ===
   alert_cooldown_seconds: 300

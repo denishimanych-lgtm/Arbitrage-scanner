@@ -6,247 +6,130 @@ module ArbitrageBot
       class LaggingExchangeDetector
         # Lagging detection result
         LaggingResult = Struct.new(
-          :lagging, :lagging_venue, :leading_venue, :lag_ms, :confidence,
+          :lagging, :lagging_exchange, :lagging_price, :median_price,
+          :deviation_pct, :other_exchanges_count,
           keyword_init: true
         )
 
-        # Price update tracking
-        UpdateRecord = Struct.new(:price, :timestamp, :venue, keyword_init: true)
+        # Settings per ТЗ
+        MIN_EXCHANGES_FOR_COMPARISON = 4
+        MIN_DEVIATION_PCT = 5.0
+        MAX_OTHER_DEVIATION_PCT = 2.0  # Others must be within 2% of median
 
-        DEFAULT_SETTINGS = {
-          # Minimum time difference to consider lagging (ms)
-          min_lag_threshold_ms: 500,
-          # Maximum lag before it's suspicious (likely stale data)
-          max_lag_threshold_ms: 10_000,
-          # Minimum price updates to calculate lag
-          min_samples: 5,
-          # Window for tracking updates (seconds)
-          tracking_window_sec: 60,
-          # Correlation threshold for detecting lag pattern
-          min_correlation: 0.7
-        }.freeze
-
-        KEY_PREFIX = 'lagging:updates:'
-
-        attr_reader :settings, :redis
-
-        def initialize(settings = {})
-          @settings = DEFAULT_SETTINGS.merge(settings)
-          @redis = ArbitrageBot.redis
+        def initialize(redis = nil)
+          @redis = redis || ArbitrageBot.redis
           @logger = ArbitrageBot.logger
         end
 
-        # Record a price update for lag detection
+        # Detect if one exchange is lagging behind majority
         # @param symbol [String] normalized symbol
-        # @param venue_id [String] venue identifier
-        # @param price [Float] current price
-        # @param timestamp [Integer] update timestamp in ms
-        def record_update(symbol, venue_id, price, timestamp = nil)
-          timestamp ||= (Time.now.to_f * 1000).to_i
-          key = update_key(symbol, venue_id)
-
-          record = {
-            price: price.to_f,
-            timestamp: timestamp,
-            venue: venue_id
-          }.to_json
-
-          @redis.lpush(key, record)
-          @redis.ltrim(key, 0, 99) # Keep last 100 updates
-          @redis.expire(key, @settings[:tracking_window_sec] * 2)
-        end
-
-        # Detect if one venue is lagging behind another
-        # @param symbol [String] normalized symbol
-        # @param venue1_id [String] first venue
-        # @param venue2_id [String] second venue
+        # @param prices_by_exchange [Hash] { exchange => { last: price, ... } }
         # @return [LaggingResult]
-        def detect(symbol, venue1_id, venue2_id)
-          updates1 = get_recent_updates(symbol, venue1_id)
-          updates2 = get_recent_updates(symbol, venue2_id)
-
-          # Need minimum samples
-          if updates1.size < @settings[:min_samples] || updates2.size < @settings[:min_samples]
+        def detect(symbol, prices_by_exchange)
+          # Need at least MIN_EXCHANGES_FOR_COMPARISON exchanges
+          if prices_by_exchange.size < MIN_EXCHANGES_FOR_COMPARISON
             return LaggingResult.new(
               lagging: false,
-              lagging_venue: nil,
-              leading_venue: nil,
-              lag_ms: 0,
-              confidence: 0.0
+              lagging_exchange: nil,
+              lagging_price: nil,
+              median_price: nil,
+              deviation_pct: 0,
+              other_exchanges_count: prices_by_exchange.size
             )
           end
 
-          # Calculate average update frequency
-          freq1 = calculate_update_frequency(updates1)
-          freq2 = calculate_update_frequency(updates2)
+          # Extract prices
+          all_prices = prices_by_exchange.map do |exchange, data|
+            price = data[:last] || data['last'] || data[:price] || data['price']
+            [exchange, price.to_f]
+          end.to_h
 
-          # Calculate lag by comparing price movements
-          lag_result = calculate_lag(updates1, updates2)
+          # Calculate median
+          sorted_prices = all_prices.values.sort
+          median_price = calculate_median(sorted_prices)
 
-          # Determine which is lagging
-          if lag_result[:lag_ms].abs >= @settings[:min_lag_threshold_ms] &&
-             lag_result[:lag_ms].abs <= @settings[:max_lag_threshold_ms] &&
-             lag_result[:confidence] >= @settings[:min_correlation]
+          return no_lagging_result(0) if median_price <= 0
 
-            if lag_result[:lag_ms] > 0
-              # Venue2 is lagging behind venue1
-              LaggingResult.new(
+          # Check each exchange for deviation
+          all_prices.each do |exchange, price|
+            deviation_pct = ((price - median_price).abs / median_price * 100)
+
+            next unless deviation_pct >= MIN_DEVIATION_PCT
+
+            # This exchange deviates significantly
+            # Check if ALL others are close to median
+            others = all_prices.except(exchange)
+            others_close = others.all? do |_, other_price|
+              other_dev = ((other_price - median_price).abs / median_price * 100)
+              other_dev < MAX_OTHER_DEVIATION_PCT
+            end
+
+            if others_close
+              # Found lagging exchange!
+              @logger.info("[LaggingDetector] #{symbol}: #{exchange} lagging by #{deviation_pct.round(2)}%")
+
+              return LaggingResult.new(
                 lagging: true,
-                lagging_venue: venue2_id,
-                leading_venue: venue1_id,
-                lag_ms: lag_result[:lag_ms],
-                confidence: lag_result[:confidence]
-              )
-            else
-              # Venue1 is lagging behind venue2
-              LaggingResult.new(
-                lagging: true,
-                lagging_venue: venue1_id,
-                leading_venue: venue2_id,
-                lag_ms: lag_result[:lag_ms].abs,
-                confidence: lag_result[:confidence]
+                lagging_exchange: exchange,
+                lagging_price: price,
+                median_price: median_price,
+                deviation_pct: deviation_pct.round(2),
+                other_exchanges_count: others.size
               )
             end
-          else
-            LaggingResult.new(
-              lagging: false,
-              lagging_venue: nil,
-              leading_venue: nil,
-              lag_ms: 0,
-              confidence: lag_result[:confidence]
-            )
           end
+
+          # No lagging exchange found
+          no_lagging_result(prices_by_exchange.size)
         end
 
-        # Detect lagging for a signal
-        # @param signal [Hash] signal with low_venue and high_venue
+        # Detect lagging for a signal (wrapper)
+        # @param signal [Hash] signal with venue info
+        # @param all_prices [Hash] all prices by venue
         # @return [LaggingResult]
-        def detect_for_signal(signal)
+        def detect_for_signal(signal, all_prices)
           symbol = signal[:symbol] || signal['symbol']
-          low_venue = signal[:low_venue] || signal['low_venue']
-          high_venue = signal[:high_venue] || signal['high_venue']
 
-          low_venue_id = venue_id(low_venue)
-          high_venue_id = venue_id(high_venue)
+          # Group prices by exchange/venue
+          prices_by_exchange = {}
 
-          detect(symbol, low_venue_id, high_venue_id)
+          all_prices.each do |venue_key, price_data|
+            # venue_key format: "exchange:SYMBOL" or "dex:SYMBOL"
+            parts = venue_key.to_s.split(':')
+            exchange = parts.first
+
+            # Only use if it matches our symbol
+            base_symbol = parts.last&.upcase
+            next unless base_symbol == symbol.upcase
+
+            prices_by_exchange[exchange] = price_data
+          end
+
+          detect(symbol, prices_by_exchange)
         end
 
         private
 
-        def update_key(symbol, venue_id)
-          "#{KEY_PREFIX}#{symbol}:#{venue_id}"
-        end
+        def calculate_median(sorted_array)
+          return 0 if sorted_array.empty?
 
-        def get_recent_updates(symbol, venue_id)
-          key = update_key(symbol, venue_id)
-          records = @redis.lrange(key, 0, -1)
-
-          cutoff = (Time.now.to_f * 1000).to_i - (@settings[:tracking_window_sec] * 1000)
-
-          records.map { |r| JSON.parse(r) }
-                 .select { |r| r['timestamp'] >= cutoff }
-                 .sort_by { |r| r['timestamp'] }
-        end
-
-        def calculate_update_frequency(updates)
-          return 0 if updates.size < 2
-
-          time_span = updates.last['timestamp'] - updates.first['timestamp']
-          return 0 if time_span == 0
-
-          (updates.size - 1) / (time_span / 1000.0) # Updates per second
-        end
-
-        def calculate_lag(updates1, updates2)
-          # Find price changes in both venues
-          changes1 = price_changes(updates1)
-          changes2 = price_changes(updates2)
-
-          return { lag_ms: 0, confidence: 0.0 } if changes1.empty? || changes2.empty?
-
-          # Try different lag offsets and find best correlation
-          best_lag = 0
-          best_correlation = 0.0
-
-          # Test lags from -5s to +5s in 100ms increments
-          (-5000..5000).step(100).each do |lag_offset|
-            correlation = calculate_correlation(changes1, changes2, lag_offset)
-            if correlation > best_correlation
-              best_correlation = correlation
-              best_lag = lag_offset
-            end
-          end
-
-          { lag_ms: best_lag, confidence: best_correlation }
-        end
-
-        def price_changes(updates)
-          changes = []
-          updates.each_cons(2) do |prev, curr|
-            pct_change = (curr['price'] - prev['price']) / prev['price'] * 100
-            changes << {
-              timestamp: curr['timestamp'],
-              change: pct_change
-            }
-          end
-          changes
-        end
-
-        def calculate_correlation(changes1, changes2, lag_offset)
-          # Match changes by timestamp with lag offset
-          matched = []
-
-          changes1.each do |c1|
-            target_time = c1[:timestamp] + lag_offset
-            # Find closest change in changes2
-            closest = changes2.min_by { |c2| (c2[:timestamp] - target_time).abs }
-            next unless closest
-
-            time_diff = (closest[:timestamp] - target_time).abs
-            # Only match if within 200ms
-            matched << [c1[:change], closest[:change]] if time_diff < 200
-          end
-
-          return 0.0 if matched.size < 3
-
-          # Calculate Pearson correlation
-          pearson_correlation(matched.map(&:first), matched.map(&:last))
-        end
-
-        def pearson_correlation(x, y)
-          return 0.0 if x.empty? || y.empty? || x.size != y.size
-
-          n = x.size
-          sum_x = x.sum
-          sum_y = y.sum
-          sum_xy = x.zip(y).map { |a, b| a * b }.sum
-          sum_x2 = x.map { |v| v**2 }.sum
-          sum_y2 = y.map { |v| v**2 }.sum
-
-          numerator = n * sum_xy - sum_x * sum_y
-          denominator = Math.sqrt((n * sum_x2 - sum_x**2) * (n * sum_y2 - sum_y**2))
-
-          return 0.0 if denominator == 0
-
-          (numerator / denominator).abs
-        end
-
-        def venue_id(venue)
-          return 'unknown' unless venue
-
-          type = (venue[:type] || venue['type'])&.to_sym
-          exchange = venue[:exchange] || venue['exchange']
-          dex = venue[:dex] || venue['dex']
-
-          case type
-          when :cex_futures, :cex_spot
-            "#{exchange}_#{type}"
-          when :perp_dex, :dex_spot
-            "#{dex}_#{type}"
+          mid = sorted_array.length / 2
+          if sorted_array.length.odd?
+            sorted_array[mid]
           else
-            'unknown'
+            (sorted_array[mid - 1] + sorted_array[mid]) / 2.0
           end
+        end
+
+        def no_lagging_result(exchange_count)
+          LaggingResult.new(
+            lagging: false,
+            lagging_exchange: nil,
+            lagging_price: nil,
+            median_price: nil,
+            deviation_pct: 0,
+            other_exchanges_count: exchange_count
+          )
         end
       end
     end

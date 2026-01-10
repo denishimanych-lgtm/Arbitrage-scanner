@@ -67,6 +67,7 @@ module ArbitrageBot
         lib/services/arbitrage_pair_generator
         lib/services/adapter_factory
         lib/storage/ticker_storage
+        lib/services/contract_fetcher
         lib/jobs/ticker_discovery_job
         lib/services/price_fetcher/cex_price_fetcher
         lib/services/price_fetcher/dex_price_fetcher
