@@ -69,18 +69,25 @@ module ArbitrageBot
         ENV['SKIP_SSL_VERIFY'] == '1'
       end
 
+      # Hosts that need IPv4 workaround due to IPv6 connectivity issues
+      IPV4_REQUIRED_HOSTS = %w[
+        api.telegram.org
+      ].freeze
+
       # Create a configured HTTP object for a URI
       # @param uri [URI] target URI
       # @param timeout [Integer] connection timeout in seconds
-      # @param prefer_ipv4 [Boolean] prefer IPv4 over IPv6 (helps with some networks)
+      # @param prefer_ipv4 [Boolean] prefer IPv4 over IPv6 (only for known problematic hosts)
       # @return [Net::HTTP] configured HTTP object
-      def self.create_http(uri, timeout: 10, prefer_ipv4: true)
+      def self.create_http(uri, timeout: 10, prefer_ipv4: nil)
         original_host = uri.host
         connect_host = original_host
         use_ip = false
 
-        # Resolve to IPv4 if preferred (helps with IPv6 connectivity issues)
-        if prefer_ipv4 && !ip_address?(original_host)
+        # Only use IPv4 for hosts known to have IPv6 issues
+        should_use_ipv4 = prefer_ipv4.nil? ? IPV4_REQUIRED_HOSTS.include?(original_host) : prefer_ipv4
+
+        if should_use_ipv4 && !ip_address?(original_host)
           begin
             ipv4 = resolve_ipv4(original_host)
             if ipv4

@@ -132,13 +132,12 @@ module ArbitrageBot
         def make_request(method, params, retry_count: 0)
           uri = URI("#{API_BASE}/bot#{@bot_token}/#{method}")
 
-          http = Net::HTTP.new(uri.host, uri.port)
-          http.use_ssl = true
-          http.open_timeout = 10
-          http.read_timeout = 30
+          http = Support::SslConfig.create_http(uri, timeout: 30)
 
           request = Net::HTTP::Post.new(uri)
           request['Content-Type'] = 'application/json'
+          # Set Host header when connected via IP
+          request['Host'] = http.original_host if http.respond_to?(:original_host) && http.original_host
           request.body = params.to_json
 
           response = http.request(request)
