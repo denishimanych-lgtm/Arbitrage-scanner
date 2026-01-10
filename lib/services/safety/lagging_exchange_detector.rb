@@ -11,14 +11,19 @@ module ArbitrageBot
           keyword_init: true
         )
 
-        # Settings per ТЗ
-        MIN_EXCHANGES_FOR_COMPARISON = 4
-        MIN_DEVIATION_PCT = 5.0
-        MAX_OTHER_DEVIATION_PCT = 2.0  # Others must be within 2% of median
+        # Default settings (can be overridden via settings)
+        DEFAULT_MIN_EXCHANGES = 4
+        DEFAULT_MIN_DEVIATION_PCT = 5.0
+        DEFAULT_MAX_OTHER_DEVIATION_PCT = 2.0
 
-        def initialize(redis = nil)
-          @redis = redis || ArbitrageBot.redis
+        def initialize(settings = {})
+          @redis = ArbitrageBot.redis
           @logger = ArbitrageBot.logger
+
+          # Load configurable parameters from settings
+          @min_exchanges = settings[:lagging_min_exchanges] || DEFAULT_MIN_EXCHANGES
+          @min_deviation_pct = settings[:lagging_min_deviation_pct] || DEFAULT_MIN_DEVIATION_PCT
+          @max_other_deviation_pct = settings[:lagging_max_other_deviation_pct] || DEFAULT_MAX_OTHER_DEVIATION_PCT
         end
 
         # Detect if one exchange is lagging behind majority
@@ -26,8 +31,8 @@ module ArbitrageBot
         # @param prices_by_exchange [Hash] { exchange => { last: price, ... } }
         # @return [LaggingResult]
         def detect(symbol, prices_by_exchange)
-          # Need at least MIN_EXCHANGES_FOR_COMPARISON exchanges
-          if prices_by_exchange.size < MIN_EXCHANGES_FOR_COMPARISON
+          # Need at least min_exchanges exchanges
+          if prices_by_exchange.size < @min_exchanges
             return LaggingResult.new(
               lagging: false,
               lagging_exchange: nil,
@@ -54,14 +59,14 @@ module ArbitrageBot
           all_prices.each do |exchange, price|
             deviation_pct = ((price - median_price).abs / median_price * 100)
 
-            next unless deviation_pct >= MIN_DEVIATION_PCT
+            next unless deviation_pct >= @min_deviation_pct
 
             # This exchange deviates significantly
             # Check if ALL others are close to median
             others = all_prices.except(exchange)
             others_close = others.all? do |_, other_price|
               other_dev = ((other_price - median_price).abs / median_price * 100)
-              other_dev < MAX_OTHER_DEVIATION_PCT
+              other_dev < @max_other_deviation_pct
             end
 
             if others_close

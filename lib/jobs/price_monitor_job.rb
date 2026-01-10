@@ -6,6 +6,7 @@ module ArbitrageBot
       PRICE_CACHE_KEY = 'prices:latest'
       SPREAD_CACHE_KEY = 'spreads:latest'
       PRICE_TTL = 10 # seconds
+      DEFAULT_MAX_PRICE_AGE_MS = 5000 # 5 seconds default
 
       attr_reader :logger, :redis
 
@@ -14,11 +15,13 @@ module ArbitrageBot
         @redis = ArbitrageBot.redis
         @settings = settings
         @min_spread_pct = settings[:min_spread_pct] || 1.0
+        @max_price_age_ms = settings[:max_price_age_ms] || DEFAULT_MAX_PRICE_AGE_MS
 
         @cex_fetcher = Services::PriceFetcher::CexPriceFetcher.new
         @dex_fetcher = Services::PriceFetcher::DexPriceFetcher.new
         @perp_dex_fetcher = Services::PriceFetcher::PerpDexPriceFetcher.new
         @ticker_storage = Storage::TickerStorage.new
+        @stale_count = 0
       end
 
       # Run single price collection cycle
@@ -73,6 +76,7 @@ module ArbitrageBot
 
       def fetch_all_prices(symbols)
         prices = {}
+        @stale_count = 0
 
         # Fetch CEX prices
         begin
@@ -80,7 +84,15 @@ module ArbitrageBot
           cex_prices.each do |exchange, exchange_prices|
             exchange_prices.each do |symbol, data|
               base = extract_base_symbol(symbol)
-              prices["#{exchange}:#{base}"] = data
+              key = "#{exchange}:#{base}"
+
+              # Check staleness before adding
+              if price_is_fresh?(data)
+                prices[key] = data
+              else
+                @stale_count += 1
+                @logger.debug("Stale price from #{key}: age > #{@max_price_age_ms}ms")
+              end
             end
           end
         rescue StandardError => e
@@ -100,14 +112,69 @@ module ArbitrageBot
           perp_prices.each do |dex, dex_prices|
             dex_prices.each do |symbol, data|
               base = extract_base_symbol(symbol)
-              prices["#{dex}:#{base}"] = data
+              key = "#{dex}:#{base}"
+
+              # Check staleness before adding
+              if price_is_fresh?(data)
+                prices[key] = data
+              else
+                @stale_count += 1
+                @logger.debug("Stale price from #{key}: age > #{@max_price_age_ms}ms")
+              end
             end
           end
         rescue StandardError => e
           @logger.error("PerpDEX price fetch error: #{e.message}")
         end
 
+        # Log stale prices if any
+        if @stale_count > 0
+          @logger.warn("[PriceMonitor] #{@stale_count} stale prices filtered out (age > #{@max_price_age_ms}ms)")
+        end
+
         prices
+      end
+
+      # Check if price data is fresh (not stale)
+      # @param data [Hash, Struct] price data with received_at or exchange_ts
+      # @return [Boolean] true if fresh, false if stale
+      def price_is_fresh?(data)
+        return true unless data # Allow nil to pass (handled elsewhere)
+
+        now_ms = (Time.now.to_f * 1000).to_i
+
+        # Check received_at first (when we received the data)
+        received_at = extract_timestamp_ms(data, :received_at)
+        if received_at && received_at > 0
+          age_ms = now_ms - received_at
+          return age_ms <= @max_price_age_ms
+        end
+
+        # Fallback to exchange_ts (timestamp from exchange)
+        exchange_ts = extract_timestamp_ms(data, :exchange_ts)
+        if exchange_ts && exchange_ts > 0
+          age_ms = now_ms - exchange_ts
+          return age_ms <= @max_price_age_ms
+        end
+
+        # If no timestamp available, consider fresh (will be caught by other checks)
+        true
+      end
+
+      # Extract timestamp in milliseconds from data
+      def extract_timestamp_ms(data, key)
+        value = if data.respond_to?(key)
+                  data.send(key)
+                elsif data.is_a?(Hash)
+                  data[key] || data[key.to_s]
+                end
+
+        return nil unless value
+
+        # Convert to ms if in seconds
+        value = value.to_i
+        value *= 1000 if value < 1_000_000_000_000 # Likely seconds, not ms
+        value
       end
 
       def fetch_dex_prices(symbols, prices)
@@ -131,13 +198,23 @@ module ArbitrageBot
               next unless price_data
 
               base = symbol.upcase
-              prices["#{dex}:#{base}"] = {
+              key = "#{dex}:#{base}"
+
+              data = {
                 bid: price_data.price,
                 ask: price_data.price,
                 last: price_data.price,
                 price_impact_pct: price_data.price_impact_pct,
                 received_at: price_data.received_at
               }
+
+              # Check staleness before adding
+              if price_is_fresh?(data)
+                prices[key] = data
+              else
+                @stale_count += 1
+                @logger.debug("Stale DEX price from #{key}: age > #{@max_price_age_ms}ms")
+              end
             rescue StandardError => e
               @logger.debug("DEX price fetch error for #{symbol}/#{dex}: #{e.message}")
             end

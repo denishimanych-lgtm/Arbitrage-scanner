@@ -159,6 +159,27 @@ module ArbitrageBot
         end
       end
       log('Started health monitor')
+
+      # Ticker refresh thread (periodic re-discovery)
+      if @options[:discovery]
+        refresh_interval = (@settings[:ticker_discovery_interval_hours] || 24) * 3600
+        @threads[:ticker_refresh] = Thread.new do
+          Thread.current.name = 'ticker_refresh'
+          loop do
+            break unless @running
+            sleep refresh_interval
+            break unless @running
+            begin
+              log('Running periodic ticker refresh...')
+              result = @discovery_job.perform
+              log("Ticker refresh complete: #{result[:symbols_count]} symbols, #{result[:pairs_count]} pairs")
+            rescue StandardError => e
+              log("Ticker refresh error: #{e.message}", :error)
+            end
+          end
+        end
+        log("Started ticker refresh (interval: #{refresh_interval / 3600}h)")
+      end
     end
 
     def monitor_loop
@@ -189,6 +210,16 @@ module ArbitrageBot
         @threads[:alerts] = Thread.new { @alert_job.run_loop }
       when :telegram
         @threads[:telegram] = Thread.new { @telegram_bot&.run }
+      when :ticker_refresh
+        refresh_interval = (@settings[:ticker_discovery_interval_hours] || 24) * 3600
+        @threads[:ticker_refresh] = Thread.new do
+          loop do
+            break unless @running
+            sleep refresh_interval
+            break unless @running
+            @discovery_job.perform rescue nil
+          end
+        end
       end
     end
 

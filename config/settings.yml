@@ -30,6 +30,14 @@ default: &default
   max_bid_ask_spread_pct: 1.0
   min_history_samples: 10
 
+  # === Price Staleness ===
+  max_price_age_ms: 5000  # Max age of price data in ms (staleness check)
+
+  # === Lagging Exchange Detection ===
+  lagging_min_exchanges: 4           # Min exchanges for comparison
+  lagging_min_deviation_pct: 5.0     # Min deviation % to consider lagging
+  lagging_max_other_deviation_pct: 2.0  # Max deviation % for other exchanges
+
   # === Alert Cooldowns ===
   alert_cooldown_seconds: 300
   lagging_alert_cooldown_seconds: 600

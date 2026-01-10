@@ -3,13 +3,14 @@
 module ArbitrageBot
   module Jobs
     class TickerDiscoveryJob
-      attr_reader :logger, :storage, :validator, :pair_generator
+      attr_reader :logger, :storage, :validator, :pair_generator, :ticker_matcher
 
       def initialize
         @logger = ArbitrageBot.logger
         @storage = Storage::TickerStorage.new
         @validator = Services::TickerValidator.new
         @pair_generator = Services::ArbitragePairGenerator.new
+        @ticker_matcher = Services::TickerMatcher.new
         @tickers = {}
       end
 
@@ -40,7 +41,18 @@ module ArbitrageBot
         # Step 8: Save to Redis
         save_all
 
+        # Log match statistics
+        match_stats = @ticker_matcher.batch_analyze(@tickers)
+        log("Match quality: excellent=#{match_stats[:excellent]}, good=#{match_stats[:good]}, fair=#{match_stats[:fair]}, poor=#{match_stats[:poor]}")
         log("Ticker discovery complete. Valid tickers: #{@tickers.count { |_, t| t.is_valid }}")
+
+        # Return statistics for orchestrator
+        {
+          symbols_count: @tickers.size,
+          valid_count: @tickers.count { |_, t| t.is_valid },
+          pairs_count: @tickers.values.sum { |t| t.arbitrage_pairs&.size || 0 },
+          match_stats: match_stats
+        }
       end
 
       private
@@ -78,29 +90,18 @@ module ArbitrageBot
         log("Total unique symbols from futures: #{@tickers.size}")
       end
 
-      # Step 2: Collect CEX Spot
+      # Step 2: Collect CEX Spot (using TickerMatcher)
       def collect_cex_spot
         log('Collecting CEX spot symbols...')
 
         Services::AdapterFactory::Cex.all.each do |exchange, adapter|
           begin
             symbols = adapter.spot_symbols
-            matched = 0
 
-            symbols.each do |sym|
-              base_asset = sym[:base_asset].upcase
+            # Use TickerMatcher for matching
+            result = @ticker_matcher.match_cex_spot(@tickers, symbols, exchange)
 
-              # Only add if we have futures for this symbol
-              next unless @tickers[base_asset]
-
-              @tickers[base_asset].add_cex_spot(
-                exchange: exchange,
-                symbol: sym[:symbol]
-              )
-              matched += 1
-            end
-
-            log("  #{exchange}: #{matched} spot matched to futures")
+            log("  #{exchange}: #{result[:matched]} spot matched to futures")
           rescue StandardError => e
             log("  #{exchange}: ERROR - #{e.message}")
           end
@@ -136,7 +137,7 @@ module ArbitrageBot
         log("Fetched contracts for #{with_contracts} symbols")
       end
 
-      # Step 4: Find on DEX
+      # Step 4: Find on DEX (using TickerMatcher)
       def find_on_dex
         log('Searching for tokens on DEX...')
 
@@ -156,16 +157,11 @@ module ArbitrageBot
                 next unless adapter
 
                 result = adapter.find_token(address)
-                next unless result && result[:found]
 
-                ticker.add_dex_spot(
-                  dex: dex_name,
-                  chain: chain,
-                  pool_address: result[:pool_address],
-                  has_liquidity: result[:has_liquidity] || result[:liquidity_usd].to_f > 1000,
-                  liquidity_usd: result[:liquidity_usd]
-                )
-                found_count += 1
+                # Use TickerMatcher for matching
+                if @ticker_matcher.match_dex_by_contract(ticker, result, dex_name, chain)
+                  found_count += 1
+                end
               rescue StandardError => e
                 @logger.debug("DEX search error #{dex_name}/#{symbol}: #{e.message}")
               end
@@ -176,29 +172,18 @@ module ArbitrageBot
         log("Found #{found_count} DEX pools")
       end
 
-      # Step 5: Find on Perp DEX
+      # Step 5: Find on Perp DEX (using TickerMatcher)
       def find_on_perp_dex
         log('Searching on Perp DEX...')
 
         Services::AdapterFactory::PerpDex.all.each do |dex_name, adapter|
           begin
             markets = adapter.markets
-            matched = 0
 
-            markets.each do |market|
-              base_asset = market[:base_asset]&.upcase || market[:symbol]&.upcase&.gsub(/USDT?$|USD$/, '')
+            # Use TickerMatcher for matching
+            result = @ticker_matcher.match_perp_dex(@tickers, markets, dex_name)
 
-              next unless @tickers[base_asset]
-
-              @tickers[base_asset].add_perp_dex(
-                dex: dex_name,
-                symbol: market[:symbol],
-                status: market[:status]
-              )
-              matched += 1
-            end
-
-            log("  #{dex_name}: #{matched} matched")
+            log("  #{dex_name}: #{result[:matched]} matched")
           rescue StandardError => e
             log("  #{dex_name}: ERROR - #{e.message}")
           end

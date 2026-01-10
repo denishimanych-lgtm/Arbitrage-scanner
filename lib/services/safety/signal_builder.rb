@@ -36,8 +36,8 @@ module ArbitrageBot
 
         def initialize(settings = {})
           @settings = settings
-          @liquidity_checker = LiquidityChecker.new(settings[:liquidity] || {})
-          @lagging_detector = LaggingExchangeDetector.new(settings[:lagging] || {})
+          @liquidity_checker = LiquidityChecker.new(settings[:liquidity] || settings)
+          @lagging_detector = LaggingExchangeDetector.new(settings[:lagging] || settings)
           @logger = ArbitrageBot.logger
         end
 
