@@ -92,7 +92,14 @@ RSpec.describe ArbitrageBot::Services::Alerts::AlertFormatter do
           spread: { real_pct: 8.0, net_pct: 7.5 },
           liquidity: {},
           timing: {},
-          lagging_info: { detected: true, lagging_venue: 'mexc', leading_venue: 'jupiter', lag_ms: 800, confidence: 0.85 },
+          lagging_info: {
+            detected: true,
+            lagging_venue: 'mexc',
+            deviation_pct: 5.5,
+            median_price: 102.0,
+            lagging_price: 108.0,
+            other_exchanges_count: 4
+          },
           created_at: Time.now.to_i,
           status: :valid
         )
@@ -103,7 +110,9 @@ RSpec.describe ArbitrageBot::Services::Alerts::AlertFormatter do
 
         expect(result).to include('LAGGING')
         expect(result).to include('LAGGING EXCHANGE DETECTED')
-        expect(result).to include('800ms')
+        expect(result).to include('mexc')
+        expect(result).to include('5.5%')
+        expect(result).to include('4')
       end
     end
   end
