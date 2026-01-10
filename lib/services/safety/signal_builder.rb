@@ -203,10 +203,11 @@ module ArbitrageBot
 
           {
             detected: true,
-            lagging_venue: lagging.lagging_venue,
-            leading_venue: lagging.leading_venue,
-            lag_ms: lagging.lag_ms,
-            confidence: lagging.confidence.round(2)
+            lagging_venue: lagging.lagging_exchange,
+            median_price: lagging.median_price,
+            lagging_price: lagging.lagging_price,
+            deviation_pct: lagging.deviation_pct,
+            other_exchanges_count: lagging.other_exchanges_count
           }
         end
 

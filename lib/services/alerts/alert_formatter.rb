@@ -146,8 +146,9 @@ module ArbitrageBot
             \u{1F4CA} #{strategy_name(signal.strategy_type)}
 
             \u{26A0}\u{FE0F} LAGGING EXCHANGE DETECTED
-            #{lag_info[:lagging_venue]} is lagging #{lag_info[:lag_ms]}ms behind #{lag_info[:leading_venue]}
-            Confidence: #{((lag_info[:confidence] || 0) * 100).round(0)}%
+            #{lag_info[:lagging_venue]} deviates #{lag_info[:deviation_pct]}% from #{lag_info[:other_exchanges_count]}+ other exchanges
+            Median price: $#{format_price(lag_info[:median_price])}
+            Lagging price: $#{format_price(lag_info[:lagging_price])}
 
             \u{1F4A1} This spread may be a pricing delay, not a real opportunity.
             The lagging exchange price may catch up quickly.

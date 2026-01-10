@@ -85,27 +85,34 @@ module ArbitrageBot
 
         # Detect lagging for a signal (wrapper)
         # @param signal [Hash] signal with venue info
-        # @param all_prices [Hash] all prices by venue
+        # @param all_prices [Hash, nil] all prices by venue (optional)
         # @return [LaggingResult]
-        def detect_for_signal(signal, all_prices)
+        def detect_for_signal(signal, all_prices = nil)
           symbol = signal[:symbol] || signal['symbol']
 
-          # Group prices by exchange/venue
-          prices_by_exchange = {}
+          # If all_prices provided, use full detection
+          if all_prices && !all_prices.empty?
+            # Group prices by exchange/venue
+            prices_by_exchange = {}
 
-          all_prices.each do |venue_key, price_data|
-            # venue_key format: "exchange:SYMBOL" or "dex:SYMBOL"
-            parts = venue_key.to_s.split(':')
-            exchange = parts.first
+            all_prices.each do |venue_key, price_data|
+              # venue_key format: "exchange:SYMBOL" or "dex:SYMBOL"
+              parts = venue_key.to_s.split(':')
+              exchange = parts.first
 
-            # Only use if it matches our symbol
-            base_symbol = parts.last&.upcase
-            next unless base_symbol == symbol.upcase
+              # Only use if it matches our symbol
+              base_symbol = parts.last&.upcase
+              next unless base_symbol == symbol.upcase
 
-            prices_by_exchange[exchange] = price_data
+              prices_by_exchange[exchange] = price_data
+            end
+
+            detect(symbol, prices_by_exchange)
+          else
+            # Without all_prices, we can't do full lagging detection
+            # Return non-lagging result
+            no_lagging_result(0)
           end
-
-          detect(symbol, prices_by_exchange)
         end
 
         private
