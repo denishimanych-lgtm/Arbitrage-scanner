@@ -13,7 +13,6 @@ module ArbitrageBot
       }.merge(options)
 
       @logger = ArbitrageBot.logger
-      @redis = ArbitrageBot.redis
       @threads = {}
       @running = false
 
@@ -237,14 +236,14 @@ module ArbitrageBot
     end
 
     def redis_connected?
-      @redis.ping == 'PONG'
+      ArbitrageBot.redis.ping == 'PONG'
     rescue StandardError
       false
     end
 
     def check_price_freshness
       # Check if prices were updated recently
-      last_update = @redis.get('prices:last_update')
+      last_update = ArbitrageBot.redis.get('prices:last_update')
       return false unless last_update
 
       Time.now.to_i - last_update.to_i < 30
@@ -253,14 +252,14 @@ module ArbitrageBot
     end
 
     def save_stats
-      @redis.hset('orchestrator:stats', {
+      ArbitrageBot.redis.hset('orchestrator:stats', {
         'last_shutdown' => Time.now.to_i,
         'uptime_seconds' => @start_time ? (Time.now - @start_time).to_i : 0
       })
     end
 
     def load_stats
-      @redis.hgetall('orchestrator:stats')
+      ArbitrageBot.redis.hgetall('orchestrator:stats')
     rescue StandardError
       {}
     end

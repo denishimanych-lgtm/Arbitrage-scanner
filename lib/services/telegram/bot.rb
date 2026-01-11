@@ -8,7 +8,8 @@ module ArbitrageBot
     module Telegram
       class Bot
         POLL_TIMEOUT = 30
-        COMMANDS = %w[start help status top threshold cooldown blacklist venues pause resume].freeze
+        COMMANDS = %w[start help status top threshold cooldown blacklist venues pause resume menu stats].freeze
+        CALLBACK_RATE_LIMIT_KEY = 'tg:rate:cb:'
 
         attr_reader :token, :chat_id, :orchestrator
 
@@ -21,7 +22,7 @@ module ArbitrageBot
           @chat_id = ENV['TELEGRAM_CHAT_ID']
           @orchestrator = orchestrator
           @logger = ArbitrageBot.logger
-          @redis = ArbitrageBot.redis
+          # Don't cache Redis - use thread-local via ArbitrageBot.redis
           @running = false
           @offset = 0
           @paused = false
@@ -44,12 +45,18 @@ module ArbitrageBot
           @running = true
           log('Bot started, listening for commands...')
 
+          poll_count = 0
           while @running
             begin
+              poll_count += 1
+              @logger.debug("[TelegramBot] Polling... (#{poll_count})") if poll_count % 10 == 1
               updates = get_updates
+              if updates.any?
+                @logger.info("[TelegramBot] Got #{updates.length} updates")
+              end
               updates.each { |update| handle_update(update) }
             rescue StandardError => e
-              @logger.error("[TelegramBot] Error: #{e.message}")
+              @logger.error("[TelegramBot] Poll error: #{e.message}")
               sleep 5
             end
           end
@@ -63,6 +70,78 @@ module ArbitrageBot
           @token && !@token.empty?
         end
 
+        # === Public methods for handlers ===
+
+        def answer_callback_query(callback_id, text: nil, show_alert: false)
+          uri = URI("https://api.telegram.org/bot#{@token}/answerCallbackQuery")
+
+          http = Support::SslConfig.create_http(uri, timeout: 10)
+
+          params = { callback_query_id: callback_id }
+          params[:text] = text if text
+          params[:show_alert] = show_alert if show_alert
+
+          request = Net::HTTP::Post.new(uri.request_uri)
+          request['Host'] = http.original_host if http.respond_to?(:original_host) && http.original_host
+          request['Content-Type'] = 'application/json'
+          request.body = params.to_json
+
+          response = http.request(request)
+          result = JSON.parse(response.body)
+          unless result['ok']
+            @logger.error("[TelegramBot] Answer callback API error: #{result['description']}")
+          end
+          result
+        rescue StandardError => e
+          @logger.error("[TelegramBot] Answer callback failed: #{e.message}")
+        end
+
+        def edit_message(chat_id, message_id, text, reply_markup: nil)
+          uri = URI("https://api.telegram.org/bot#{@token}/editMessageText")
+
+          http = Support::SslConfig.create_http(uri, timeout: 10)
+
+          params = {
+            chat_id: chat_id,
+            message_id: message_id,
+            text: text
+          }
+          params[:reply_markup] = reply_markup if reply_markup
+
+          request = Net::HTTP::Post.new(uri.request_uri)
+          request['Host'] = http.original_host if http.respond_to?(:original_host) && http.original_host
+          request['Content-Type'] = 'application/json'
+          request.body = params.to_json
+
+          response = http.request(request)
+          result = JSON.parse(response.body)
+          unless result['ok']
+            @logger.error("[TelegramBot] Edit message API error: #{result['description']}")
+          end
+          result
+        rescue StandardError => e
+          @logger.error("[TelegramBot] Edit message failed: #{e.message}")
+          nil
+        end
+
+        def delete_message(chat_id, message_id)
+          uri = URI("https://api.telegram.org/bot#{@token}/deleteMessage")
+
+          http = Support::SslConfig.create_http(uri, timeout: 10)
+
+          request = Net::HTTP::Post.new(uri.request_uri)
+          request['Host'] = http.original_host if http.respond_to?(:original_host) && http.original_host
+          request['Content-Type'] = 'application/json'
+          request.body = {
+            chat_id: chat_id,
+            message_id: message_id
+          }.to_json
+
+          http.request(request)
+        rescue StandardError => e
+          @logger.error("[TelegramBot] Delete message failed: #{e.message}")
+        end
+
         private
 
         def get_updates
@@ -70,7 +149,7 @@ module ArbitrageBot
           uri.query = URI.encode_www_form(
             offset: @offset,
             timeout: POLL_TIMEOUT,
-            allowed_updates: ['message']
+            allowed_updates: %w[message callback_query]
           )
 
           response = http_get(uri)
@@ -85,11 +164,35 @@ module ArbitrageBot
         end
 
         def handle_update(update)
+          @logger.debug("[TelegramBot] Processing update: #{update['update_id']}")
+
+          # Handle callback queries (button presses)
+          if update['callback_query']
+            @logger.info("[TelegramBot] Callback query: #{update['callback_query']['data']}")
+            handle_callback_query(update['callback_query'])
+            return
+          end
+
+          @logger.debug("[TelegramBot] Not a callback, checking message...")
+
           message = update['message']
           return unless message
 
           chat_id = message['chat']['id']
           text = message['text']&.strip
+          @logger.debug("[TelegramBot] Message from #{chat_id}: #{text}")
+
+          # Check if user is awaiting text input (for blacklist add)
+          begin
+            state = State::UserState.new(chat_id)
+            if state.awaiting_input? && text && !text.start_with?('/')
+              handle_text_input(chat_id, text, state)
+              return
+            end
+          rescue => e
+            @logger.error("[TelegramBot] State check error: #{e.message}")
+          end
+
           return unless text&.start_with?('/')
 
           # Check authorization
@@ -100,7 +203,7 @@ module ArbitrageBot
 
           # Check rate limit
           unless check_rate_limit(chat_id)
-            send_message(chat_id, "⏱ Too many commands. Please wait a moment.")
+            send_message(chat_id, "\u23F1 Too many commands. Please wait a moment.")
             return
           end
 
@@ -111,6 +214,83 @@ module ArbitrageBot
 
           # Handle command
           handle_command(chat_id, command, args)
+        end
+
+        def handle_callback_query(callback_query)
+          chat_id = callback_query['message']['chat']['id']
+          message_id = callback_query['message']['message_id']
+          callback_id = callback_query['id']
+          data = callback_query['data']
+
+          @logger.info("[TelegramBot] Processing callback from chat_id=#{chat_id}, data=#{data}")
+
+          # Check authorization
+          unless authorized?(chat_id)
+            @logger.warn("[TelegramBot] Unauthorized callback from #{chat_id}")
+            answer_callback_query(callback_id, text: 'Unauthorized')
+            return
+          end
+
+          @logger.debug("[TelegramBot] Authorization passed for #{chat_id}")
+
+          # Check callback rate limit
+          begin
+            rate_ok = check_callback_rate_limit(chat_id)
+            @logger.debug("[TelegramBot] Rate limit check returned: #{rate_ok}")
+            unless rate_ok
+              @logger.debug("[TelegramBot] Rate limited for #{chat_id}")
+              answer_callback_query(callback_id, text: 'Too fast! Please wait.')
+              return
+            end
+          rescue StandardError => e
+            @logger.error("[TelegramBot] Rate limit check error: #{e.message}")
+            @logger.error(e.backtrace.first(3).join("\n"))
+          end
+
+          @logger.debug("[TelegramBot] Rate limit passed for #{chat_id}")
+
+          # Route to callback handler
+          @logger.info("[TelegramBot] Creating callback handler...")
+          handler = Handlers::CallbackHandler.new(
+            bot: self,
+            chat_id: chat_id,
+            message_id: message_id,
+            callback_id: callback_id,
+            data: data,
+            orchestrator: @orchestrator
+          )
+
+          @logger.info("[TelegramBot] Calling handler.process...")
+          handler.process
+          @logger.info("[TelegramBot] Handler.process complete")
+        rescue StandardError => e
+          @logger.error("[TelegramBot] Callback error: #{e.class}: #{e.message}")
+          @logger.error(e.backtrace.first(10).join("\n"))
+          answer_callback_query(callback_id, text: 'Error processing request')
+        end
+
+        def handle_text_input(chat_id, text, state)
+          input_type = state.awaiting_input_type
+          context = state.context
+
+          case input_type
+          when :blacklist_symbols
+            bl = Alerts::Blacklist.new
+            bl.add_symbol(text.upcase.strip)
+            send_message(chat_id, "\u2705 Added #{text.upcase.strip} to symbols blacklist")
+          when :blacklist_exchanges
+            bl = Alerts::Blacklist.new
+            bl.add_exchange(text.downcase.strip)
+            send_message(chat_id, "\u2705 Added #{text.downcase.strip} to exchanges blacklist")
+          when :blacklist_pairs
+            bl = Alerts::Blacklist.new
+            bl.add_pair(text.strip)
+            send_message(chat_id, "\u2705 Added #{text.strip} to pairs blacklist")
+          end
+
+          # Clear awaiting state and show main menu
+          state.set_state(:main_menu)
+          cmd_menu(chat_id)
         end
 
         def authorized?(chat_id)
@@ -154,6 +334,8 @@ module ArbitrageBot
             cmd_start(chat_id)
           when 'help'
             cmd_help(chat_id)
+          when 'menu'
+            cmd_menu(chat_id)
           when 'status'
             cmd_status(chat_id)
           when 'top'
@@ -180,20 +362,15 @@ module ArbitrageBot
         # === Commands ===
 
         def cmd_start(chat_id)
-          send_message(chat_id, <<~MSG)
-            Welcome to Arbitrage Scanner Bot!
-
-            I monitor price spreads between DEX and Futures exchanges and send alerts when profitable opportunities appear.
-
-            Use /help to see available commands.
-            Use /status to check system status.
-          MSG
+          # Show main menu with keyboard
+          cmd_menu(chat_id)
         end
 
         def cmd_help(chat_id)
           send_message(chat_id, <<~MSG)
             Available Commands:
 
+            /menu - Interactive menu with buttons
             /status - System status and statistics
             /top [N] - Top N spreads (default: 10)
             /threshold <N> - Set minimum spread % (e.g., /threshold 3.5)
@@ -206,6 +383,25 @@ module ArbitrageBot
             /resume - Resume alerts
             /stats - Detailed statistics
           MSG
+        end
+
+        def cmd_menu(chat_id)
+          keyboard = Keyboards::MainMenuKeyboard.new(user_id: chat_id)
+          text = Keyboards::MainMenuKeyboard.build_text
+
+          state = State::UserState.new(chat_id)
+          state.set_state(:main_menu)
+
+          # Clear navigation stack when opening fresh menu
+          nav = State::NavigationStack.new(chat_id)
+          nav.clear
+
+          result = send_message_with_keyboard(chat_id, text, keyboard.to_reply_markup)
+
+          # Store message ID for editing
+          if result && result['ok']
+            state.set_message_id(result.dig('result', 'message_id'))
+          end
         end
 
         def cmd_status(chat_id)
@@ -243,7 +439,7 @@ module ArbitrageBot
           limit = (args[0] || 10).to_i.clamp(1, 50)
 
           # Get latest spreads from Redis
-          spreads_json = @redis.get('spreads:latest')
+          spreads_json = ArbitrageBot.redis.get('spreads:latest')
           return send_message(chat_id, 'No spread data available.') unless spreads_json
 
           spreads = JSON.parse(spreads_json)
@@ -270,8 +466,8 @@ module ArbitrageBot
           end
 
           new_threshold = args[0].to_f
-          if new_threshold < 0.1 || new_threshold > 50
-            send_message(chat_id, 'Threshold must be between 0.1 and 50')
+          if new_threshold < 0.1
+            send_message(chat_id, 'Threshold must be at least 0.1%')
             return
           end
 
@@ -361,7 +557,7 @@ module ArbitrageBot
 
             #{lines.join("\n")}
 
-            Last discovery: #{@redis.get('discovery:last_run') || 'Never'}
+            Last discovery: #{ArbitrageBot.redis.get('discovery:last_run') || 'Never'}
           MSG
 
           send_message(chat_id, msg)
@@ -369,13 +565,13 @@ module ArbitrageBot
 
         def cmd_pause(chat_id)
           @paused = true
-          @redis.set('alerts:paused', '1')
+          ArbitrageBot.redis.set('alerts:paused', '1')
           send_message(chat_id, 'Alerts PAUSED. Use /resume to continue.')
         end
 
         def cmd_resume(chat_id)
           @paused = false
-          @redis.del('alerts:paused')
+          ArbitrageBot.redis.del('alerts:paused')
           send_message(chat_id, 'Alerts RESUMED.')
         end
 
@@ -411,6 +607,55 @@ module ArbitrageBot
 
         # === Helpers ===
 
+        def check_callback_rate_limit(chat_id)
+          @logger.debug("[TelegramBot] Entering check_callback_rate_limit for #{chat_id}")
+          key = "#{CALLBACK_RATE_LIMIT_KEY}#{chat_id}"
+          @logger.debug("[TelegramBot] Rate limit key: #{key}")
+
+          # Allow 1 callback per second per user
+          exists = ArbitrageBot.redis.exists?(key)
+          @logger.debug("[TelegramBot] Key exists: #{exists}")
+          return false if exists
+
+          ArbitrageBot.redis.setex(key, 1, '1')
+          @logger.debug("[TelegramBot] Rate limit key set")
+          true
+        rescue StandardError => e
+          @logger.error("[TelegramBot] Rate limit check error in method: #{e.class}: #{e.message}")
+          true # Allow on error
+        end
+
+        def send_message_with_keyboard(chat_id, text, reply_markup)
+          uri = URI("https://api.telegram.org/bot#{@token}/sendMessage")
+
+          http = Support::SslConfig.create_http(uri, timeout: 10)
+
+          body = {
+            chat_id: chat_id,
+            text: text,
+            reply_markup: reply_markup,
+            disable_web_page_preview: true
+          }
+
+          @logger.info("[TelegramBot] Sending keyboard message to #{chat_id}")
+          @logger.debug("[TelegramBot] Body: #{body.to_json}")
+
+          request = Net::HTTP::Post.new(uri.request_uri)
+          request['Host'] = http.original_host if http.respond_to?(:original_host) && http.original_host
+          request['Content-Type'] = 'application/json'
+          request.body = body.to_json
+
+          response = http.request(request)
+          result = JSON.parse(response.body)
+
+          @logger.info("[TelegramBot] Keyboard send result: ok=#{result['ok']}, error=#{result['description']}")
+          result
+        rescue StandardError => e
+          @logger.error("[TelegramBot] Send with keyboard failed: #{e.message}")
+          @logger.error(e.backtrace.first(5).join("\n"))
+          nil
+        end
+
         def send_message(chat_id, text)
           uri = URI("https://api.telegram.org/bot#{@token}/sendMessage")
 
@@ -440,8 +685,8 @@ module ArbitrageBot
         end
 
         def load_alert_stats
-          stats = @redis.hgetall('alerts:stats')
-          stats[:queue_size] = @redis.llen('signals:pending')
+          stats = ArbitrageBot.redis.hgetall('alerts:stats')
+          stats[:queue_size] = ArbitrageBot.redis.llen('signals:pending')
           stats.transform_keys(&:to_sym)
         rescue StandardError
           {}
