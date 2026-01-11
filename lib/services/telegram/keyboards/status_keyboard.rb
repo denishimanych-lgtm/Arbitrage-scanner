@@ -49,7 +49,7 @@ module ArbitrageBot
             ArbitrageBot.logger.debug("[StatusKeyboard] build_text: paused=#{paused}")
 
             thread_status = threads.map do |name, state|
-              emoji = state == 'alive' ? '✅' : '❌'
+              emoji = %w[alive running].include?(state) ? '✅' : '❌'
               "  #{emoji} #{name}: #{state}"
             end.join("\n")
 
