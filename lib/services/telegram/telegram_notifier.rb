@@ -127,6 +127,73 @@ module ArbitrageBot
           chat&.dig('result', 'id').to_s == @chat_id.to_s
         end
 
+        # Send a message with inline keyboard
+        # @param chat_id [String, Integer] chat ID
+        # @param text [String] message text
+        # @param reply_markup [Hash] keyboard markup
+        # @param parse_mode [String, nil] 'HTML' or 'MarkdownV2'
+        # @return [Hash, nil] response data or nil
+        def send_message_with_keyboard(chat_id, text, reply_markup, parse_mode: nil)
+          return nil unless configured?
+
+          params = {
+            chat_id: chat_id,
+            text: truncate_message(text),
+            reply_markup: reply_markup.to_json,
+            disable_web_page_preview: true
+          }
+          params[:parse_mode] = parse_mode if parse_mode
+
+          make_request('sendMessage', params)
+        end
+
+        # Edit message text with optional keyboard update
+        # @param chat_id [String, Integer] chat ID
+        # @param message_id [Integer] message ID to edit
+        # @param text [String] new text
+        # @param reply_markup [Hash, nil] new keyboard markup
+        # @param parse_mode [String, nil] 'HTML' or 'MarkdownV2'
+        # @return [Hash, nil] response data or nil
+        def edit_message_with_keyboard(chat_id, message_id, text, reply_markup: nil, parse_mode: nil)
+          return nil unless configured?
+
+          params = {
+            chat_id: chat_id,
+            message_id: message_id,
+            text: truncate_message(text)
+          }
+          params[:reply_markup] = reply_markup.to_json if reply_markup
+          params[:parse_mode] = parse_mode if parse_mode
+
+          make_request('editMessageText', params)
+        end
+
+        # Answer a callback query (acknowledge button press)
+        # @param callback_query_id [String] callback query ID
+        # @param text [String, nil] optional toast text
+        # @param show_alert [Boolean] show as alert popup
+        # @return [Hash, nil] response data or nil
+        def answer_callback_query(callback_query_id, text: nil, show_alert: false)
+          params = { callback_query_id: callback_query_id }
+          params[:text] = text if text
+          params[:show_alert] = show_alert if show_alert
+
+          make_request('answerCallbackQuery', params)
+        end
+
+        # Edit only the reply markup (keyboard) of a message
+        # @param chat_id [String, Integer] chat ID
+        # @param message_id [Integer] message ID
+        # @param reply_markup [Hash] new keyboard markup
+        # @return [Hash, nil] response data or nil
+        def edit_message_reply_markup(chat_id, message_id, reply_markup)
+          make_request('editMessageReplyMarkup', {
+            chat_id: chat_id,
+            message_id: message_id,
+            reply_markup: reply_markup.to_json
+          })
+        end
+
         private
 
         def make_request(method, params, retry_count: 0)
