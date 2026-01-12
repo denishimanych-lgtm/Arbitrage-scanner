@@ -65,7 +65,8 @@ module ArbitrageBot
         ticker_discovery_interval_hours: :integer,
         log_level: :string,
         telegram_bot_token: :string,
-        telegram_chat_id: :string
+        telegram_chat_id: :string,
+        max_price_age_ms: :integer
       }.freeze
 
       attr_reader :redis, :settings

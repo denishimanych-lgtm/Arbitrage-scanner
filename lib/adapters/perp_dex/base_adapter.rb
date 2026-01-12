@@ -56,6 +56,8 @@ module ArbitrageBot
           http = Support::SslConfig.create_http(uri, timeout: @http_timeout)
 
           request = Net::HTTP::Get.new(uri.request_uri)
+          request['Accept'] = 'application/json'
+          request['User-Agent'] = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
           headers.each { |k, v| request[k] = v }
 
           response = http.request(request)
@@ -69,6 +71,8 @@ module ArbitrageBot
           raise ApiError, "JSON parse error: #{e.message}"
         rescue Net::OpenTimeout, Net::ReadTimeout => e
           raise ApiError, "Timeout: #{e.message}"
+        rescue OpenSSL::SSL::SSLError => e
+          raise ApiError, "SSL error: #{e.message}"
         end
 
         def post(url, body:, headers: {})
@@ -77,6 +81,8 @@ module ArbitrageBot
 
           request = Net::HTTP::Post.new(uri.request_uri)
           request['Content-Type'] = 'application/json'
+          request['Accept'] = 'application/json'
+          request['User-Agent'] = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
           headers.each { |k, v| request[k] = v }
           request.body = body.to_json
 
@@ -89,6 +95,8 @@ module ArbitrageBot
           JSON.parse(response.body)
         rescue JSON::ParserError => e
           raise ApiError, "JSON parse error: #{e.message}"
+        rescue OpenSSL::SSL::SSLError => e
+          raise ApiError, "SSL error: #{e.message}"
         end
 
         def normalize_symbol(symbol)

@@ -7,7 +7,7 @@ module ArbitrageBot
         class ApiError < StandardError; end
 
         def initialize
-          @http_timeout = 15
+          @http_timeout = 5 # Reduced to fail faster on DNS issues
         end
 
         # @return [String] DEX identifier
@@ -53,6 +53,8 @@ module ArbitrageBot
           http = Support::SslConfig.create_http(uri, timeout: @http_timeout)
 
           request = Net::HTTP::Get.new(uri.request_uri)
+          # Set Host header when connected via IP
+          request['Host'] = http.original_host if http.respond_to?(:original_host) && http.original_host
           headers.each { |k, v| request[k] = v }
 
           response = http.request(request)
@@ -74,6 +76,8 @@ module ArbitrageBot
 
           request = Net::HTTP::Post.new(uri.request_uri)
           request['Content-Type'] = 'application/json'
+          # Set Host header when connected via IP
+          request['Host'] = http.original_host if http.respond_to?(:original_host) && http.original_host
           headers.each { |k, v| request[k] = v }
           request.body = body.to_json
 

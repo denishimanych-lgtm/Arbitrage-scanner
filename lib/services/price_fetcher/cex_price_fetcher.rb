@@ -45,10 +45,14 @@ module ArbitrageBot
 
         # Fetch from all exchanges in parallel
         def fetch_all_exchanges(symbols = nil)
+          ArbitrageBot.logger.info("[CEX] Starting fetch_all_exchanges...")
           results = {}
           threads = []
 
-          AdapterFactory::Cex.available.each do |exchange|
+          exchanges = AdapterFactory::Cex.available
+          ArbitrageBot.logger.info("[CEX] Exchanges: #{exchanges.join(', ')}")
+
+          exchanges.each do |exchange|
             threads << Thread.new do
               begin
                 prices = fetch_batch(exchange, symbols)
@@ -60,11 +64,19 @@ module ArbitrageBot
             end
           end
 
-          threads.each do |t|
-            t.join
+          ArbitrageBot.logger.info("[CEX] Started #{threads.size} threads, waiting...")
+
+          threads.each_with_index do |t, i|
+            # Timeout thread after 15 seconds to prevent hanging
+            t.join(15)
+            if t.alive?
+              ArbitrageBot.logger.warn("[CEX] Thread #{i} timed out, killing...")
+              t.kill
+            end
             results.merge!(t[:result]) if t[:result]
           end
 
+          ArbitrageBot.logger.info("[CEX] Fetch complete, #{results.size} exchanges returned")
           results
         end
 

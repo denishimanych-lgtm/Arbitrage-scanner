@@ -17,6 +17,10 @@ gem 'eventmachine', '~> 1.2'
 gem 'redis', '~> 5.0'
 gem 'hiredis-client', '~> 0.18'
 
+# PostgreSQL (analytics)
+gem 'pg', '~> 1.5'
+gem 'connection_pool', '~> 2.4'
+
 # Concurrency
 gem 'concurrent-ruby', '~> 1.2'
 

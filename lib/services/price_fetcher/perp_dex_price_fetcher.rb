@@ -74,11 +74,17 @@ module ArbitrageBot
             end
           end
 
-          threads.each do |t|
-            t.join
+          threads.each_with_index do |t, i|
+            # Timeout thread after 15 seconds to prevent hanging
+            t.join(15)
+            if t.alive?
+              ArbitrageBot.logger.warn("[PerpDEX] Thread #{i} timed out, killing...")
+              t.kill
+            end
             results.merge!(t[:result]) if t[:result]
           end
 
+          ArbitrageBot.logger.info("[PerpDEX] Fetch complete, #{results.size} dexes returned")
           results
         end
 

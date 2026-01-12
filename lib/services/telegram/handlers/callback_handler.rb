@@ -65,6 +65,14 @@ module ArbitrageBot
               show_status
             when :top
               show_top_spreads
+            when :funding
+              show_funding
+            when :zscores
+              show_zscores
+            when :stables
+              show_stables
+            when :stats
+              show_stats
             else
               answer("Unknown navigation: #{@parsed[:target]}")
             end
@@ -218,6 +226,76 @@ module ArbitrageBot
             text = Keyboards::SpreadsKeyboard.build_text(data[:spreads], data[:page], data[:total])
 
             edit_message(text, keyboard.to_reply_markup)
+            answer
+          end
+
+          def show_funding
+            push_current_state
+            @state.set_state(:funding)
+
+            alerter = Funding::FundingAlerter.new
+            text = alerter.format_funding_message
+
+            keyboard = { inline_keyboard: [
+              [{ text: '🔄 Refresh', callback_data: CallbackData.encode(:act, :refresh, 'fn') }],
+              [{ text: '⬅️ Back', callback_data: CallbackData.encode(:nav, :back) }]
+            ] }
+
+            edit_message(text, keyboard)
+            answer
+          end
+
+          def show_zscores
+            push_current_state
+            @state.set_state(:zscores)
+
+            tracker = ZScore::ZScoreTracker.new
+            zscores = tracker.all_zscores
+            alerter = ZScore::ZScoreAlerter.new
+            text = alerter.format_zscores_message(zscores)
+
+            keyboard = { inline_keyboard: [
+              [{ text: '🔄 Refresh', callback_data: CallbackData.encode(:act, :refresh, 'zs') }],
+              [{ text: '⬅️ Back', callback_data: CallbackData.encode(:nav, :back) }]
+            ] }
+
+            edit_message(text, keyboard)
+            answer
+          end
+
+          def show_stables
+            push_current_state
+            @state.set_state(:stables)
+
+            monitor = Stablecoin::DepegMonitor.new
+            prices = monitor.current_prices
+            alerter = Stablecoin::DepegAlerter.new
+            text = alerter.format_prices_message(prices)
+
+            keyboard = { inline_keyboard: [
+              [{ text: '🔄 Refresh', callback_data: CallbackData.encode(:act, :refresh, 'st') }],
+              [{ text: '⬅️ Back', callback_data: CallbackData.encode(:nav, :back) }]
+            ] }
+
+            edit_message(text, keyboard)
+            answer
+          end
+
+          def show_stats
+            push_current_state
+            @state.set_state(:stats)
+
+            text = Analytics::TradeTracker.format_stats_message(days: 30)
+
+            keyboard = { inline_keyboard: [
+              [{ text: '7 дней', callback_data: CallbackData.encode(:act, :stats_period, '7') },
+               { text: '30 дней', callback_data: CallbackData.encode(:act, :stats_period, '30') },
+               { text: '90 дней', callback_data: CallbackData.encode(:act, :stats_period, '90') }],
+              [{ text: '🔄 Refresh', callback_data: CallbackData.encode(:act, :refresh, 'st') }],
+              [{ text: '⬅️ Back', callback_data: CallbackData.encode(:nav, :back) }]
+            ] }
+
+            edit_message(text, keyboard)
             answer
           end
 
@@ -434,6 +512,8 @@ module ArbitrageBot
               show_main_menu
             when :refresh
               handle_refresh
+            when :stats_period
+              handle_stats_period
             when :noop
               answer
             when :confirm
@@ -445,11 +525,33 @@ module ArbitrageBot
             end
           end
 
+          def handle_stats_period
+            days = @parsed[:params][0].to_i
+            days = 30 if days <= 0
+
+            text = Analytics::TradeTracker.format_stats_message(days: days)
+
+            keyboard = { inline_keyboard: [
+              [{ text: '7 дней', callback_data: CallbackData.encode(:act, :stats_period, '7') },
+               { text: '30 дней', callback_data: CallbackData.encode(:act, :stats_period, '30') },
+               { text: '90 дней', callback_data: CallbackData.encode(:act, :stats_period, '90') }],
+              [{ text: '🔄 Refresh', callback_data: CallbackData.encode(:act, :refresh, 'stats') }],
+              [{ text: '⬅️ Back', callback_data: CallbackData.encode(:nav, :back) }]
+            ] }
+
+            edit_message(text, keyboard)
+            answer("#{days} days")
+          end
+
           def handle_refresh
             target = @parsed[:params][0]
             case target
             when 'ss' then show_status
             when 'tp' then show_top_spreads(@state.context[:page] || 1)
+            when 'fn' then show_funding
+            when 'zs' then show_zscores
+            when 'st' then show_stables
+            when 'stats' then show_stats
             else answer('Refreshed')
             end
           end
@@ -504,6 +606,14 @@ module ArbitrageBot
               show_status
             when :top_spreads
               show_top_spreads(context[:page] || 1)
+            when :funding
+              show_funding
+            when :zscores
+              show_zscores
+            when :stables
+              show_stables
+            when :stats
+              show_stats
             else
               show_main_menu
             end

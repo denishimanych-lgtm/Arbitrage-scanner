@@ -21,7 +21,13 @@ module ArbitrageBot
     end
 
     def redis
-      @redis ||= Redis.new(url: ENV['REDIS_URL'] || 'redis://localhost:6379/0')
+      # Thread-local Redis connection to avoid thread-safety issues
+      Thread.current[:redis] ||= Redis.new(
+        url: ENV['REDIS_URL'] || 'redis://localhost:6379/0',
+        connect_timeout: 5,
+        read_timeout: 10,
+        write_timeout: 10
+      )
     end
 
     def logger
@@ -60,6 +66,19 @@ module ArbitrageBot
       # Load in order: base classes first, then implementations
       load_order = %w[
         lib/support/ssl_config
+        lib/services/analytics/database_connection
+        lib/services/analytics/postgres_logger
+        lib/services/analytics/signal_repository
+        lib/services/analytics/trade_tracker
+        lib/services/funding/funding_collector
+        lib/services/funding/funding_alerter
+        lib/services/zscore/pairs_config
+        lib/services/zscore/ratio_calculator
+        lib/services/zscore/zscore_tracker
+        lib/services/zscore/zscore_alerter
+        lib/services/stablecoin/depeg_monitor
+        lib/services/stablecoin/depeg_alerter
+        lib/adapters/defi/curve_adapter
         lib/adapters/cex/base_adapter
         lib/adapters/dex/base_adapter
         lib/adapters/perp_dex/base_adapter
@@ -92,9 +111,22 @@ module ArbitrageBot
         lib/services/alerts/alert_formatter
         lib/services/alerts/cooldown_manager
         lib/services/alerts/blacklist
+        lib/services/telegram/callback_data
+        lib/services/telegram/state/user_state
+        lib/services/telegram/state/navigation_stack
+        lib/services/telegram/keyboards/base_keyboard
+        lib/services/telegram/keyboards/main_menu_keyboard
+        lib/services/telegram/keyboards/settings_keyboard
+        lib/services/telegram/keyboards/blacklist_keyboard
+        lib/services/telegram/keyboards/spreads_keyboard
+        lib/services/telegram/keyboards/status_keyboard
+        lib/services/telegram/handlers/callback_handler
         lib/services/telegram/telegram_notifier
         lib/services/telegram/bot
         lib/jobs/alert_job
+        lib/jobs/funding_rate_job
+        lib/jobs/zscore_monitor_job
+        lib/jobs/stablecoin_monitor_job
         lib/orchestrator
       ]
 

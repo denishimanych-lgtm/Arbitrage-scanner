@@ -15,7 +15,13 @@ module ArbitrageBot
       ALL_SYMBOLS_KEY = 'tickers:all_symbols'
 
       def initialize(redis = nil)
-        @redis = redis || ArbitrageBot.redis
+        # Don't cache redis connection - use thread-local via ArbitrageBot.redis
+        @custom_redis = redis
+      end
+
+      # Get thread-local redis connection
+      def redis
+        @custom_redis || ArbitrageBot.redis
       end
 
       # Save a ticker to Redis
@@ -23,7 +29,7 @@ module ArbitrageBot
         symbol = ticker.symbol.upcase
 
         # Save master record
-        @redis.set(format(MASTER_KEY, symbol), ticker.to_json)
+        redis.set(format(MASTER_KEY, symbol), ticker.to_json)
 
         # Update indexes
         update_indexes(ticker)
@@ -36,7 +42,7 @@ module ArbitrageBot
       def save_all(tickers)
         return if tickers.empty?
 
-        @redis.pipelined do |pipe|
+        redis.pipelined do |pipe|
           tickers.each do |ticker|
             symbol = ticker.symbol.upcase
             pipe.set(format(MASTER_KEY, symbol), ticker.to_json)
@@ -47,18 +53,18 @@ module ArbitrageBot
         tickers.each { |t| update_indexes(t) }
 
         # Update metadata
-        @redis.set(LAST_UPDATE_KEY, Time.now.to_i)
-        @redis.set(COUNT_KEY, tickers.size)
+        redis.set(LAST_UPDATE_KEY, Time.now.to_i)
+        redis.set(COUNT_KEY, tickers.size)
 
         # Update all symbols set
         symbols = tickers.map { |t| t.symbol.upcase }
-        @redis.del(ALL_SYMBOLS_KEY)
-        @redis.sadd(ALL_SYMBOLS_KEY, symbols) unless symbols.empty?
+        redis.del(ALL_SYMBOLS_KEY)
+        redis.sadd(ALL_SYMBOLS_KEY, symbols) unless symbols.empty?
       end
 
       # Get a ticker by symbol
       def get(symbol)
-        json = @redis.get(format(MASTER_KEY, symbol.upcase))
+        json = redis.get(format(MASTER_KEY, symbol.upcase))
         return nil unless json
 
         Models::Ticker.from_json(json)
@@ -69,50 +75,50 @@ module ArbitrageBot
         return [] if symbols.empty?
 
         keys = symbols.map { |s| format(MASTER_KEY, s.upcase) }
-        jsons = @redis.mget(*keys)
+        jsons = redis.mget(*keys)
 
         jsons.compact.map { |json| Models::Ticker.from_json(json) }
       end
 
       # Get all symbols
       def all_symbols
-        @redis.smembers(ALL_SYMBOLS_KEY) || []
+        redis.smembers(ALL_SYMBOLS_KEY) || []
       end
 
       # Get symbols by exchange (futures)
       def symbols_by_exchange_futures(exchange)
-        @redis.smembers(format(BY_EXCHANGE_FUTURES_KEY, exchange.downcase)) || []
+        redis.smembers(format(BY_EXCHANGE_FUTURES_KEY, exchange.downcase)) || []
       end
 
       # Get symbols by exchange (spot)
       def symbols_by_exchange_spot(exchange)
-        @redis.smembers(format(BY_EXCHANGE_SPOT_KEY, exchange.downcase)) || []
+        redis.smembers(format(BY_EXCHANGE_SPOT_KEY, exchange.downcase)) || []
       end
 
       # Get symbols by DEX
       def symbols_by_dex(dex)
-        @redis.smembers(format(BY_DEX_KEY, dex.downcase)) || []
+        redis.smembers(format(BY_DEX_KEY, dex.downcase)) || []
       end
 
       # Get symbols by Perp DEX
       def symbols_by_perp_dex(dex)
-        @redis.smembers(format(BY_PERP_DEX_KEY, dex.downcase)) || []
+        redis.smembers(format(BY_PERP_DEX_KEY, dex.downcase)) || []
       end
 
       # Find symbol by contract address
       def symbol_by_contract(chain, address)
-        @redis.get(format(CONTRACT_KEY, chain.downcase, address.downcase))
+        redis.get(format(CONTRACT_KEY, chain.downcase, address.downcase))
       end
 
       # Get last update timestamp
       def last_update
-        ts = @redis.get(LAST_UPDATE_KEY)
+        ts = redis.get(LAST_UPDATE_KEY)
         ts ? Time.at(ts.to_i) : nil
       end
 
       # Get ticker count
       def count
-        @redis.get(COUNT_KEY).to_i
+        redis.get(COUNT_KEY).to_i
       end
 
       # Delete a ticker
@@ -124,16 +130,16 @@ module ArbitrageBot
         remove_from_indexes(ticker)
 
         # Remove master record
-        @redis.del(format(MASTER_KEY, symbol.upcase))
+        redis.del(format(MASTER_KEY, symbol.upcase))
 
         # Remove from all symbols
-        @redis.srem(ALL_SYMBOLS_KEY, symbol.upcase)
+        redis.srem(ALL_SYMBOLS_KEY, symbol.upcase)
       end
 
       # Clear all ticker data
       def clear_all
-        keys = @redis.keys('tickers:*') + @redis.keys('contracts:*')
-        @redis.del(*keys) unless keys.empty?
+        keys = redis.keys('tickers:*') + redis.keys('contracts:*')
+        redis.del(*keys) unless keys.empty?
       end
 
       # Get statistics
@@ -155,22 +161,22 @@ module ArbitrageBot
 
         # CEX Futures indexes
         ticker.venues[:cex_futures]&.each do |venue|
-          @redis.sadd(format(BY_EXCHANGE_FUTURES_KEY, venue[:exchange].downcase), symbol)
+          redis.sadd(format(BY_EXCHANGE_FUTURES_KEY, venue[:exchange].downcase), symbol)
         end
 
         # CEX Spot indexes
         ticker.venues[:cex_spot]&.each do |venue|
-          @redis.sadd(format(BY_EXCHANGE_SPOT_KEY, venue[:exchange].downcase), symbol)
+          redis.sadd(format(BY_EXCHANGE_SPOT_KEY, venue[:exchange].downcase), symbol)
         end
 
         # DEX indexes
         ticker.venues[:dex_spot]&.each do |venue|
-          @redis.sadd(format(BY_DEX_KEY, venue[:dex].downcase), symbol)
+          redis.sadd(format(BY_DEX_KEY, venue[:dex].downcase), symbol)
         end
 
         # Perp DEX indexes
         ticker.venues[:perp_dex]&.each do |venue|
-          @redis.sadd(format(BY_PERP_DEX_KEY, venue[:dex].downcase), symbol)
+          redis.sadd(format(BY_PERP_DEX_KEY, venue[:dex].downcase), symbol)
         end
       end
 
@@ -178,19 +184,19 @@ module ArbitrageBot
         symbol = ticker.symbol.upcase
 
         ticker.venues[:cex_futures]&.each do |venue|
-          @redis.srem(format(BY_EXCHANGE_FUTURES_KEY, venue[:exchange].downcase), symbol)
+          redis.srem(format(BY_EXCHANGE_FUTURES_KEY, venue[:exchange].downcase), symbol)
         end
 
         ticker.venues[:cex_spot]&.each do |venue|
-          @redis.srem(format(BY_EXCHANGE_SPOT_KEY, venue[:exchange].downcase), symbol)
+          redis.srem(format(BY_EXCHANGE_SPOT_KEY, venue[:exchange].downcase), symbol)
         end
 
         ticker.venues[:dex_spot]&.each do |venue|
-          @redis.srem(format(BY_DEX_KEY, venue[:dex].downcase), symbol)
+          redis.srem(format(BY_DEX_KEY, venue[:dex].downcase), symbol)
         end
 
         ticker.venues[:perp_dex]&.each do |venue|
-          @redis.srem(format(BY_PERP_DEX_KEY, venue[:dex].downcase), symbol)
+          redis.srem(format(BY_PERP_DEX_KEY, venue[:dex].downcase), symbol)
         end
       end
 
@@ -198,7 +204,7 @@ module ArbitrageBot
         ticker.contracts.each do |chain, address|
           next unless address
 
-          @redis.set(
+          redis.set(
             format(CONTRACT_KEY, chain.downcase, address.downcase),
             ticker.symbol.upcase
           )
@@ -207,11 +213,11 @@ module ArbitrageBot
 
       def count_by_pattern(pattern)
         result = {}
-        keys = @redis.keys(pattern.gsub('%s', '*'))
+        keys = redis.keys(pattern.gsub('%s', '*'))
 
         keys.each do |key|
           name = key.split(':')[-1]
-          result[name] = @redis.scard(key)
+          result[name] = redis.scard(key)
         end
 
         result

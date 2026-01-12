@@ -4,9 +4,14 @@ module ArbitrageBot
   module Adapters
     module Dex
       class JupiterAdapter < BaseAdapter
+        # Jupiter API endpoints (v6 is the latest stable)
+        # Using public endpoints - may have rate limits
         API_URL = 'https://quote-api.jup.ag/v6'
-        PRICE_URL = 'https://price.jup.ag/v6'
+        PRICE_URL = 'https://api.jup.ag/price/v2'  # Updated to v2
         TOKEN_LIST_URL = 'https://token.jup.ag/all'
+
+        # Fallback timeout for DNS issues
+        DNS_TIMEOUT = 5
 
         USDC_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'
         WSOL_MINT = 'So11111111111111111111111111111111111111112'

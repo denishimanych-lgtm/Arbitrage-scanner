@@ -1,0 +1,249 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# Migration runner for PostgreSQL analytics database
+# Usage:
+#   bin/migrate           # Run all pending migrations
+#   bin/migrate status    # Show migration status
+#   bin/migrate rollback  # Rollback last migration
+#   bin/migrate create NAME  # Create new migration file
+
+require 'bundler/setup'
+require 'pg'
+require 'yaml'
+require 'erb'
+require 'fileutils'
+
+class Migrator
+  MIGRATIONS_DIR = File.expand_path('../db/migrate', __dir__)
+  SCHEMA_TABLE = 'schema_migrations'
+
+  def initialize
+    @config = load_config
+    @conn = connect
+    ensure_schema_table
+  end
+
+  def run
+    pending = pending_migrations
+    if pending.empty?
+      puts "No pending migrations."
+      return
+    end
+
+    pending.each do |migration|
+      run_migration(migration)
+    end
+
+    puts "\nAll migrations complete!"
+  end
+
+  def status
+    puts "Migration Status:"
+    puts "-" * 50
+
+    all_migrations.each do |file|
+      version = extract_version(file)
+      status = applied?(version) ? "UP" : "DOWN"
+      name = File.basename(file, '.rb')
+      puts "  #{status.ljust(6)} #{name}"
+    end
+  end
+
+  def rollback
+    applied = applied_migrations.sort.reverse
+    if applied.empty?
+      puts "Nothing to rollback."
+      return
+    end
+
+    version = applied.first
+    file = find_migration_file(version)
+
+    if file.nil?
+      puts "Migration file for #{version} not found!"
+      return
+    end
+
+    puts "Rolling back: #{File.basename(file)}"
+    content = File.read(file)
+
+    # Extract DOWN section
+    if content =~ /-- DOWN\s*\n(.*)/m
+      down_sql = $1.strip
+      if down_sql.empty?
+        puts "  No DOWN migration defined, skipping."
+      else
+        @conn.exec(down_sql)
+      end
+    end
+
+    @conn.exec_params("DELETE FROM #{SCHEMA_TABLE} WHERE version = $1", [version])
+    puts "  Rolled back successfully."
+  end
+
+  def create(name)
+    timestamp = Time.now.strftime('%Y%m%d%H%M%S')
+    filename = "#{timestamp}_#{name.downcase.gsub(/\s+/, '_')}.rb"
+    filepath = File.join(MIGRATIONS_DIR, filename)
+
+    FileUtils.mkdir_p(MIGRATIONS_DIR)
+
+    template = <<~RUBY
+      # frozen_string_literal: true
+
+      # Migration: #{name}
+      # Created: #{Time.now}
+
+      SQL = <<~SQL
+        -- UP
+
+        -- DOWN
+
+      SQL
+    RUBY
+
+    File.write(filepath, template)
+    puts "Created: db/migrate/#{filename}"
+  end
+
+  private
+
+  def load_config
+    config_path = File.expand_path('../config/database.yml', __dir__)
+    yaml_content = ERB.new(File.read(config_path)).result
+    config = YAML.safe_load(yaml_content, permitted_classes: [], permitted_symbols: [], aliases: true)
+    env = ENV.fetch('ARBITRAGE_ENV', 'development')
+    config[env]
+  end
+
+  def connect
+    PG.connect(
+      host: @config['host'],
+      port: @config['port'],
+      dbname: @config['database'],
+      user: @config['username'],
+      password: @config['password']
+    )
+  rescue PG::ConnectionBad => e
+    # Try to create the database
+    if e.message.include?('does not exist')
+      create_database
+      retry
+    end
+    raise
+  end
+
+  def create_database
+    dbname = @config['database']
+    puts "Creating database: #{dbname}"
+
+    admin_conn = PG.connect(
+      host: @config['host'],
+      port: @config['port'],
+      dbname: 'postgres',
+      user: @config['username'],
+      password: @config['password']
+    )
+
+    admin_conn.exec("CREATE DATABASE #{dbname}")
+    admin_conn.close
+    puts "Database created successfully."
+  end
+
+  def ensure_schema_table
+    @conn.exec(<<~SQL)
+      CREATE TABLE IF NOT EXISTS #{SCHEMA_TABLE} (
+        version VARCHAR(14) PRIMARY KEY,
+        applied_at TIMESTAMPTZ DEFAULT NOW()
+      )
+    SQL
+  end
+
+  def all_migrations
+    return [] unless Dir.exist?(MIGRATIONS_DIR)
+
+    Dir.glob(File.join(MIGRATIONS_DIR, '*.rb')).sort
+  end
+
+  def pending_migrations
+    all_migrations.reject { |f| applied?(extract_version(f)) }
+  end
+
+  def applied_migrations
+    result = @conn.exec("SELECT version FROM #{SCHEMA_TABLE}")
+    result.map { |row| row['version'] }
+  end
+
+  def applied?(version)
+    applied_migrations.include?(version)
+  end
+
+  def extract_version(file)
+    File.basename(file).split('_').first
+  end
+
+  def find_migration_file(version)
+    all_migrations.find { |f| extract_version(f) == version }
+  end
+
+  def run_migration(file)
+    version = extract_version(file)
+    puts "Running: #{File.basename(file)}"
+
+    content = File.read(file)
+
+    # Extract UP section: everything between "-- UP" and "-- DOWN"
+    if content =~ /--\s*UP\s*\n(.*?)(?=--\s*DOWN)/m
+      up_sql = $1.strip
+    elsif content =~ /SQL\s*=\s*<<~SQL\s*\n(.*?)\nSQL/m
+      # Fallback: entire heredoc content
+      up_sql = $1.strip
+    else
+      up_sql = nil
+    end
+
+    if up_sql.nil? || up_sql.empty?
+      puts "  No UP migration found, skipping."
+    else
+      @conn.exec(up_sql)
+    end
+
+    @conn.exec_params("INSERT INTO #{SCHEMA_TABLE} (version) VALUES ($1)", [version])
+    puts "  Completed."
+  rescue PG::Error => e
+    puts "  ERROR: #{e.message}"
+    raise
+  end
+end
+
+# Main execution
+command = ARGV[0] || 'run'
+
+begin
+  migrator = Migrator.new
+
+  case command
+  when 'run', 'up'
+    migrator.run
+  when 'status'
+    migrator.status
+  when 'rollback', 'down'
+    migrator.rollback
+  when 'create'
+    name = ARGV[1]
+    if name.nil? || name.empty?
+      puts "Usage: bin/migrate create NAME"
+      exit 1
+    end
+    migrator.create(name)
+  else
+    puts "Unknown command: #{command}"
+    puts "Usage: bin/migrate [run|status|rollback|create NAME]"
+    exit 1
+  end
+rescue PG::ConnectionBad => e
+  puts "Database connection failed: #{e.message}"
+  puts "\nMake sure PostgreSQL is running and configured in config/database.yml"
+  exit 1
+end

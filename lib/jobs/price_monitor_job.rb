@@ -8,14 +8,14 @@ module ArbitrageBot
       PRICE_TTL = 10 # seconds
       DEFAULT_MAX_PRICE_AGE_MS = 5000 # 5 seconds default
 
-      attr_reader :logger, :redis
+      attr_reader :logger
 
       def initialize(settings = {})
         @logger = ArbitrageBot.logger
-        @redis = ArbitrageBot.redis
+        # Use ArbitrageBot.redis directly (thread-local)
         @settings = settings
         @min_spread_pct = settings[:min_spread_pct] || 1.0
-        @max_price_age_ms = settings[:max_price_age_ms] || DEFAULT_MAX_PRICE_AGE_MS
+        @max_price_age_ms = (settings[:max_price_age_ms] || DEFAULT_MAX_PRICE_AGE_MS).to_i
 
         @cex_fetcher = Services::PriceFetcher::CexPriceFetcher.new
         @dex_fetcher = Services::PriceFetcher::DexPriceFetcher.new(@settings)
@@ -30,18 +30,26 @@ module ArbitrageBot
         start_time = Time.now
 
         # Get all tracked symbols
+        log('Fetching symbols from storage...')
         symbols = @ticker_storage.all_symbols
+        log("Got #{symbols.size} symbols")
 
         return if symbols.empty?
 
         # Fetch prices from all sources in parallel
+        log('Fetching CEX prices...')
         all_prices = fetch_all_prices(symbols)
+        log("Fetched #{all_prices.size} prices")
 
         # Cache prices
+        log('Caching prices...')
         cache_prices(all_prices)
+        log('Prices cached')
 
         # Calculate spreads for all arbitrage pairs
+        log('Calculating spreads...')
         spreads = calculate_spreads(symbols, all_prices)
+        log("Calculated #{spreads.size} spreads")
 
         # Cache spreads
         cache_spreads(spreads)
@@ -97,18 +105,26 @@ module ArbitrageBot
           end
         rescue StandardError => e
           @logger.error("CEX price fetch error: #{e.message}")
+          @logger.error("Backtrace: #{e.backtrace.first(5).join(' | ')}")
         end
 
         # Fetch DEX prices for tokens with contracts
-        begin
-          fetch_dex_prices(symbols, prices)
-        rescue StandardError => e
-          @logger.error("DEX price fetch error: #{e.message}")
-        end
+        # Skip DEX price fetching - DEX venues are not currently configured
+        # Uncomment when DEX integration is ready:
+        # begin
+        #   log('Fetching DEX prices...')
+        #   fetch_dex_prices(symbols, prices)
+        #   log('DEX prices done')
+        # rescue StandardError => e
+        #   @logger.error("DEX price fetch error: #{e.message}")
+        # end
+        log('DEX prices skipped (not configured)')
 
         # Fetch Perp DEX prices
         begin
+          log('Fetching Perp DEX prices...')
           perp_prices = @perp_dex_fetcher.fetch_all_dexes
+          log("Perp DEX prices done: #{perp_prices.size} dexes")
           perp_prices.each do |dex, dex_prices|
             dex_prices.each do |symbol, data|
               base = extract_base_symbol(symbol)
@@ -178,13 +194,23 @@ module ArbitrageBot
       end
 
       def fetch_dex_prices(symbols, prices)
-        symbols.each do |symbol|
-          ticker = @ticker_storage.get(symbol)
+        dex_count = 0
+        symbols.each_with_index do |symbol, idx|
+          log("DEX progress: #{idx}/#{symbols.size} (#{symbol})") if idx % 100 == 0
+
+          begin
+            ticker = @ticker_storage.get(symbol)
+          rescue StandardError => e
+            @logger.warn("Ticker get error for #{symbol}: #{e.message}")
+            next
+          end
           next unless ticker
 
           # Skip if no DEX venues
           dex_venues = ticker.venues[:dex_spot] || []
           next if dex_venues.empty?
+
+          dex_count += dex_venues.size
 
           dex_venues.each do |venue|
             dex = venue[:dex]
@@ -220,11 +246,13 @@ module ArbitrageBot
             end
           end
         end
+        log("DEX scan complete: #{dex_count} venues checked")
       end
 
       def cache_prices(prices)
         return if prices.empty?
 
+        log("Serializing #{prices.size} prices...")
         serialized = prices.transform_values do |data|
           if data.respond_to?(:to_h)
             data.to_h.transform_values(&:to_s)
@@ -232,9 +260,18 @@ module ArbitrageBot
             data.transform_values(&:to_s)
           end
         end
+        log("Serialization done, saving to Redis...")
 
-        @redis.set(PRICE_CACHE_KEY, serialized.to_json)
-        @redis.expire(PRICE_CACHE_KEY, PRICE_TTL)
+        json_data = serialized.to_json
+        log("JSON size: #{json_data.bytesize} bytes")
+
+        Timeout.timeout(10) do
+          ArbitrageBot.redis.set(PRICE_CACHE_KEY, json_data)
+          ArbitrageBot.redis.expire(PRICE_CACHE_KEY, PRICE_TTL)
+        end
+        log("Saved to Redis")
+      rescue Timeout::Error
+        @logger.error("Redis SET timed out after 10 seconds")
       end
 
       def calculate_spreads(symbols, all_prices)
@@ -288,16 +325,16 @@ module ArbitrageBot
       def cache_spreads(spreads)
         return if spreads.empty?
 
-        @redis.set(SPREAD_CACHE_KEY, spreads.to_json)
-        @redis.expire(SPREAD_CACHE_KEY, PRICE_TTL)
+        ArbitrageBot.redis.set(SPREAD_CACHE_KEY, spreads.to_json)
+        ArbitrageBot.redis.expire(SPREAD_CACHE_KEY, PRICE_TTL)
       end
 
       def trigger_analysis(spreads)
         high_spreads = spreads.select { |s| s[:spread_pct].abs >= @min_spread_pct }
 
         high_spreads.each do |spread|
-          @redis.lpush('queue:orderbook_analysis', spread.to_json)
-          @redis.ltrim('queue:orderbook_analysis', 0, 999) # Keep max 1000 pending
+          ArbitrageBot.redis.lpush('queue:orderbook_analysis', spread.to_json)
+          ArbitrageBot.redis.ltrim('queue:orderbook_analysis', 0, 999) # Keep max 1000 pending
         end
 
         log("Triggered analysis for #{high_spreads.size} high spreads") if high_spreads.any?

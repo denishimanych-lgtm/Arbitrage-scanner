@@ -9,7 +9,10 @@ module ArbitrageBot
         discovery: true,
         price_monitor: true,
         alerts: true,
-        telegram_bot: true
+        telegram_bot: true,
+        funding_rate: true,
+        zscore_monitor: true,
+        stablecoin_monitor: true
       }.merge(options)
 
       @logger = ArbitrageBot.logger
@@ -74,6 +77,18 @@ module ArbitrageBot
       @orderbook_job = Jobs::OrderbookAnalysisJob.new(@settings)
       @alert_job = Jobs::AlertJob.new(@settings)
 
+      if @options[:funding_rate]
+        @funding_job = Jobs::FundingRateJob.new(@settings)
+      end
+
+      if @options[:zscore_monitor]
+        @zscore_job = Jobs::ZScoreMonitorJob.new(@settings)
+      end
+
+      if @options[:stablecoin_monitor]
+        @stablecoin_job = Jobs::StablecoinMonitorJob.new(@settings)
+      end
+
       if @options[:telegram_bot]
         @telegram_bot = Services::Telegram::Bot.new(orchestrator: self)
       end
@@ -133,6 +148,45 @@ module ArbitrageBot
           end
         end
         log('Started alert worker')
+      end
+
+      # Funding rate worker thread
+      if @options[:funding_rate] && @funding_job
+        @threads[:funding_rate] = Thread.new do
+          Thread.current.name = 'funding_rate'
+          begin
+            @funding_job.run_loop
+          rescue StandardError => e
+            log("Funding rate job error: #{e.message}", :error)
+          end
+        end
+        log('Started funding rate monitor')
+      end
+
+      # Z-score monitor worker thread
+      if @options[:zscore_monitor] && @zscore_job
+        @threads[:zscore_monitor] = Thread.new do
+          Thread.current.name = 'zscore_monitor'
+          begin
+            @zscore_job.run_loop
+          rescue StandardError => e
+            log("Z-score monitor error: #{e.message}", :error)
+          end
+        end
+        log('Started z-score monitor')
+      end
+
+      # Stablecoin monitor worker thread
+      if @options[:stablecoin_monitor] && @stablecoin_job
+        @threads[:stablecoin_monitor] = Thread.new do
+          Thread.current.name = 'stablecoin_monitor'
+          begin
+            @stablecoin_job.run_loop
+          rescue StandardError => e
+            log("Stablecoin monitor error: #{e.message}", :error)
+          end
+        end
+        log('Started stablecoin monitor')
       end
 
       # Telegram bot thread
@@ -209,6 +263,10 @@ module ArbitrageBot
         @threads[:alerts] = Thread.new { @alert_job.run_loop }
       when :telegram
         @threads[:telegram] = Thread.new { @telegram_bot&.run }
+      when :zscore_monitor
+        @threads[:zscore_monitor] = Thread.new { @zscore_job&.run_loop }
+      when :stablecoin_monitor
+        @threads[:stablecoin_monitor] = Thread.new { @stablecoin_job&.run_loop }
       when :ticker_refresh
         refresh_interval = (@settings[:ticker_discovery_interval_hours] || 24) * 3600
         @threads[:ticker_refresh] = Thread.new do

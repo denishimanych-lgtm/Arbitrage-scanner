@@ -51,7 +51,7 @@ module ArbitrageBot
           profit_estimate = calculate_profit_estimate(signal)
 
           <<~MSG.strip
-            #{fires} #{signal.symbol} | #{signal.spread[:real_pct]}%
+            #{fires} HEDGED | #{signal.symbol} | #{signal.spread[:real_pct]}%
             \u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}
             \u{1F4CB} #{signal.id}
             \u{1F4CA} #{strategy_name(signal.strategy_type)}
@@ -97,7 +97,7 @@ module ArbitrageBot
           profit_estimate = calculate_profit_estimate(signal)
 
           <<~MSG.strip
-            #{fires} #{signal.symbol} | #{signal.spread[:real_pct]}% \u{1F528}MANUAL
+            \u{26A0}\u{FE0F} MANUAL | #{signal.symbol} | #{signal.spread[:real_pct]}%
             \u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}
             \u{1F4CB} #{signal.id}
             \u{1F4CA} #{strategy_name(signal.strategy_type)}

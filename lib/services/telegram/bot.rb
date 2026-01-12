@@ -8,7 +8,7 @@ module ArbitrageBot
     module Telegram
       class Bot
         POLL_TIMEOUT = 30
-        COMMANDS = %w[start help status top threshold cooldown blacklist venues pause resume menu stats].freeze
+        COMMANDS = %w[start help status top threshold cooldown blacklist venues pause resume menu stats taken result signals funding zscores stables].freeze
         CALLBACK_RATE_LIMIT_KEY = 'tg:rate:cb:'
 
         attr_reader :token, :chat_id, :orchestrator
@@ -353,7 +353,19 @@ module ArbitrageBot
           when 'resume'
             cmd_resume(chat_id)
           when 'stats'
-            cmd_stats(chat_id)
+            cmd_stats(chat_id, args)
+          when 'taken'
+            cmd_taken(chat_id, args)
+          when 'result'
+            cmd_result(chat_id, args)
+          when 'signals'
+            cmd_signals(chat_id, args)
+          when 'funding'
+            cmd_funding(chat_id, args)
+          when 'zscores'
+            cmd_zscores(chat_id)
+          when 'stables'
+            cmd_stables(chat_id)
           else
             send_message(chat_id, "Unknown command: /#{command}\nUse /help for available commands.")
           end
@@ -381,7 +393,21 @@ module ArbitrageBot
             /venues - Show connected exchanges
             /pause - Pause alerts
             /resume - Resume alerts
-            /stats - Detailed statistics
+
+            Signal Tracking:
+            /taken <ID> - Mark signal as taken
+            /result <ID> +X% [notes] - Record trade result
+            /signals [N] - Show last N signals (default: 10)
+            /stats [strategy] - Trading statistics
+
+            Funding:
+            /funding [SYMBOL] - Current funding rates
+
+            Z-Score:
+            /zscores - Current z-score pairs status
+
+            Stablecoins:
+            /stables - Current stablecoin prices
           MSG
         end
 
@@ -575,12 +601,89 @@ module ArbitrageBot
           send_message(chat_id, 'Alerts RESUMED.')
         end
 
-        def cmd_stats(chat_id)
+        def cmd_stats(chat_id, args = [])
+          strategy = args[0]
+
+          # Use TradeTracker for comprehensive stats
+          begin
+            msg = Analytics::TradeTracker.format_stats_message(days: 30)
+            send_message(chat_id, msg)
+          rescue StandardError => e
+            @logger.error("[TelegramBot] Stats error: #{e.message}")
+            # Fallback to old stats if PostgreSQL not available
+            fallback_stats(chat_id)
+          end
+        end
+
+        def cmd_taken(chat_id, args)
+          if args.empty?
+            send_message(chat_id, "Usage: /taken <signal_id>\n\nExample: /taken abc12345")
+            return
+          end
+
+          signal_id = args[0]
+          user_id = chat_id
+
+          result = Analytics::TradeTracker.take(signal_id, user_id)
+          send_message(chat_id, result[:message])
+        rescue StandardError => e
+          @logger.error("[TelegramBot] Taken error: #{e.message}")
+          send_message(chat_id, "Error: #{e.message}")
+        end
+
+        def cmd_result(chat_id, args)
+          if args.size < 2
+            send_message(chat_id, "Usage: /result <signal_id> <+/-X%> [notes]\n\nExamples:\n/result abc12345 +2.5%\n/result abc12345 -1.2% slippage")
+            return
+          end
+
+          signal_id = args[0]
+          pnl_str = args[1]
+          notes = args[2..].join(' ') if args.size > 2
+          user_id = chat_id
+
+          result = Analytics::TradeTracker.record_result(signal_id, pnl_str, user_id, notes: notes)
+          send_message(chat_id, result[:message])
+        rescue StandardError => e
+          @logger.error("[TelegramBot] Result error: #{e.message}")
+          send_message(chat_id, "Error: #{e.message}")
+        end
+
+        def cmd_signals(chat_id, args)
+          limit = (args[0] || 10).to_i.clamp(1, 50)
+
+          signals = Analytics::SignalRepository.recent(limit: limit)
+
+          if signals.empty?
+            send_message(chat_id, "No signals found.\n\nSignals are created when alerts are sent.")
+            return
+          end
+
+          lines = signals.map do |s|
+            short_id = Analytics::SignalRepository.short_id(s[:id], s[:strategy])
+            status_emoji = case s[:status]
+                           when 'sent' then "\u23F3"
+                           when 'taken' then "\u2705"
+                           when 'closed' then "\u2714\uFE0F"
+                           else "\u2753"
+                           end
+            time = Time.parse(s[:ts].to_s).strftime('%m/%d %H:%M')
+            "#{status_emoji} `#{short_id}` #{s[:symbol]} (#{s[:strategy]})\n   #{time} | #{s[:status]}"
+          end
+
+          msg = "Recent Signals (#{signals.size}):\n\n#{lines.join("\n\n")}"
+          send_message(chat_id, msg)
+        rescue StandardError => e
+          @logger.error("[TelegramBot] Signals error: #{e.message}")
+          send_message(chat_id, "Error loading signals: #{e.message}")
+        end
+
+        def fallback_stats(chat_id)
           stats = load_alert_stats
           cooldown_stats = @cooldown.stats
 
           msg = <<~MSG
-            Detailed Statistics
+            Detailed Statistics (Redis only)
 
             Alerts:
               Total sent: #{stats[:alerts_sent] || 0}
@@ -603,6 +706,44 @@ module ArbitrageBot
           MSG
 
           send_message(chat_id, msg)
+        end
+
+        def cmd_funding(chat_id, args)
+          symbol = args[0]&.upcase
+
+          # Get funding rate job from orchestrator or create ad-hoc
+          funding_job = @orchestrator&.instance_variable_get(:@funding_job) ||
+                        Jobs::FundingRateJob.new
+
+          msg = funding_job.format_for_telegram(symbol)
+          send_message(chat_id, msg)
+        rescue StandardError => e
+          @logger.error("[TelegramBot] Funding error: #{e.message}")
+          send_message(chat_id, "Error loading funding rates: #{e.message}")
+        end
+
+        def cmd_zscores(chat_id)
+          # Get zscore monitor job from orchestrator or create ad-hoc
+          zscore_job = @orchestrator&.instance_variable_get(:@zscore_job) ||
+                       Jobs::ZScoreMonitorJob.new
+
+          msg = zscore_job.format_for_telegram
+          send_message(chat_id, msg)
+        rescue StandardError => e
+          @logger.error("[TelegramBot] ZScores error: #{e.message}")
+          send_message(chat_id, "Error loading z-scores: #{e.message}")
+        end
+
+        def cmd_stables(chat_id)
+          # Get stablecoin monitor job from orchestrator or create ad-hoc
+          stablecoin_job = @orchestrator&.instance_variable_get(:@stablecoin_job) ||
+                           Jobs::StablecoinMonitorJob.new
+
+          msg = stablecoin_job.format_for_telegram
+          send_message(chat_id, msg)
+        rescue StandardError => e
+          @logger.error("[TelegramBot] Stables error: #{e.message}")
+          send_message(chat_id, "Error loading stablecoin prices: #{e.message}")
         end
 
         # === Helpers ===

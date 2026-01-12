@@ -48,6 +48,8 @@ module ArbitrageBot
           data['markets'].each do |symbol, market|
             next if symbols && !symbols.include?(symbol)
             next unless market['status'] == 'ACTIVE'
+            # Skip if price data is missing
+            next if market['indexPrice'].to_s.empty? || market['oraclePrice'].to_s.empty?
 
             result[symbol] = {
               bid: BigDecimal(market['indexPrice'].to_s),

@@ -46,14 +46,18 @@ module ArbitrageBot
           result = {}
           all_mids.each do |sym, mid|
             next if symbols && !symbols.include?(sym)
+            # Skip if mid price is missing
+            next if mid.to_s.empty?
 
             ctx = asset_ctxs.find { |a| a['coin'] == sym } || {}
+            # Skip if mark price is missing
+            next if ctx['markPx'].to_s.empty?
 
             result[sym] = {
               mid: BigDecimal(mid.to_s),
               mark_price: BigDecimal(ctx['markPx'].to_s),
-              funding_rate: BigDecimal(ctx['funding'].to_s),
-              open_interest: BigDecimal(ctx['openInterest'].to_s),
+              funding_rate: ctx['funding'].to_s.empty? ? BigDecimal('0') : BigDecimal(ctx['funding'].to_s),
+              open_interest: ctx['openInterest'].to_s.empty? ? BigDecimal('0') : BigDecimal(ctx['openInterest'].to_s),
               timestamp: Time.now.to_i * 1000
             }
           end

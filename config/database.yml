@@ -1,0 +1,33 @@
+# PostgreSQL configuration for analytics layer
+# Connection settings loaded via ENV variables
+
+default: &default
+  adapter: postgresql
+  pool: <%= ENV.fetch('PG_POOL', 5) %>
+  timeout: 5000
+  encoding: unicode
+
+development:
+  <<: *default
+  host: <%= ENV.fetch('PG_HOST', 'localhost') %>
+  port: <%= ENV.fetch('PG_PORT', 5432) %>
+  database: <%= ENV.fetch('PG_DATABASE', 'arbitrage_dev') %>
+  username: <%= ENV.fetch('PG_USER', ENV['USER'] || 'arbitrage') %>
+  password: <%= ENV['PG_PASSWORD'] %>
+
+test:
+  <<: *default
+  host: <%= ENV.fetch('PG_HOST', 'localhost') %>
+  port: <%= ENV.fetch('PG_PORT', 5432) %>
+  database: <%= ENV.fetch('PG_DATABASE', 'arbitrage_test') %>
+  username: <%= ENV.fetch('PG_USER', ENV['USER'] || 'arbitrage') %>
+  password: <%= ENV['PG_PASSWORD'] %>
+
+production:
+  <<: *default
+  host: <%= ENV['PG_HOST'] || 'localhost' %>
+  port: <%= ENV.fetch('PG_PORT', 5432) %>
+  database: <%= ENV['PG_DATABASE'] || 'arbitrage_prod' %>
+  username: <%= ENV['PG_USER'] || 'arbitrage' %>
+  password: <%= ENV['PG_PASSWORD'] %>
+  pool: <%= ENV.fetch('PG_POOL', 10) %>

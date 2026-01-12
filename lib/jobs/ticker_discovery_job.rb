@@ -137,39 +137,49 @@ module ArbitrageBot
         log("Fetched contracts for #{with_contracts} symbols")
       end
 
-      # Step 4: Find on DEX (using TickerMatcher)
+      # Step 4: Add DEX spots from contract addresses
+      # We already have contract addresses from CoinGecko/CMC
+      # No need to verify via DEX API - just add them directly
+      # Price fetching will validate if they actually have liquidity
       def find_on_dex
-        log('Searching for tokens on DEX...')
+        if ENV['SKIP_DEX_SEARCH']
+          log('DEX search skipped (SKIP_DEX_SEARCH=1)')
+          return
+        end
 
-        dex_adapters = Services::AdapterFactory::Dex.all
-        found_count = 0
+        log('Adding DEX spots from contract addresses...')
+
+        added_count = 0
+        chains_count = Hash.new(0)
 
         @tickers.each do |symbol, ticker|
           ticker.contracts.each do |chain, address|
-            next unless address
+            next unless address && !address.empty?
 
             # Find DEXes for this chain
             chain_dexes = Services::AdapterFactory::Dex::CHAINS[chain] || []
+            next if chain_dexes.empty?
 
-            chain_dexes.each do |dex_name|
-              begin
-                adapter = dex_adapters[dex_name]
-                next unless adapter
+            # Add DEX spot for the primary DEX of this chain
+            primary_dex = chain_dexes.first
 
-                result = adapter.find_token(address)
+            ticker.add_dex_spot(
+              dex: primary_dex,
+              chain: chain,
+              contract: address,
+              pool_address: nil, # Will be resolved during price fetch
+              has_liquidity: true # Assume yes, price fetch will validate
+            )
 
-                # Use TickerMatcher for matching
-                if @ticker_matcher.match_dex_by_contract(ticker, result, dex_name, chain)
-                  found_count += 1
-                end
-              rescue StandardError => e
-                @logger.debug("DEX search error #{dex_name}/#{symbol}: #{e.message}")
-              end
-            end
+            added_count += 1
+            chains_count[chain] += 1
           end
         end
 
-        log("Found #{found_count} DEX pools")
+        log("Added #{added_count} DEX spots from contracts")
+        chains_count.each do |chain, count|
+          log("  #{chain}: #{count}")
+        end
       end
 
       # Step 5: Find on Perp DEX (using TickerMatcher)

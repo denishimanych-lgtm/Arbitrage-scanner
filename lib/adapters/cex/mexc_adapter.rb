@@ -79,6 +79,9 @@ module ArbitrageBot
           result = {}
           data['data'].each do |t|
             next if symbols && !symbols.include?(t['symbol'])
+            # Skip entries with missing price data
+            next if t['bid1'].to_s.empty? || t['ask1'].to_s.empty? || t['lastPrice'].to_s.empty?
+
             result[t['symbol']] = {
               bid: BigDecimal(t['bid1'].to_s),
               ask: BigDecimal(t['ask1'].to_s),

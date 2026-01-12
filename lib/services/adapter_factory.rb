@@ -50,7 +50,10 @@ module ArbitrageBot
           'ethereum' => %w[uniswap sushiswap],
           'bsc' => %w[pancakeswap],
           'avalanche' => %w[traderjoe],
-          'arbitrum' => %w[camelot]
+          'arbitrum' => %w[camelot sushiswap],
+          'base' => %w[uniswap],
+          'polygon' => %w[uniswap sushiswap],
+          'optimism' => %w[uniswap]
         }.freeze
 
         def self.get(dex)

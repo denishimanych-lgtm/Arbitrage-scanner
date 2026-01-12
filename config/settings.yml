@@ -6,7 +6,7 @@ default: &default
   min_spread_pct: 2.0
   high_spread_threshold: 10.0
   medium_spread_threshold: 5.0
-  max_spread_pct: 50.0
+  # No max_spread_pct limit - show all spreads regardless of size
 
   # === Liquidity Requirements ===
   min_liquidity_usd: 500000

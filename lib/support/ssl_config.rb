@@ -74,6 +74,10 @@ module ArbitrageBot
         api.telegram.org
       ].freeze
 
+      # Hardcoded IP fallbacks for hosts with DNS resolution issues
+      # Note: Jupiter temporarily disabled due to SNI issues with IP connection
+      DNS_FALLBACKS = {}.freeze
+
       # Create a configured HTTP object for a URI
       # @param uri [URI] target URI
       # @param timeout [Integer] connection timeout in seconds
@@ -84,8 +88,10 @@ module ArbitrageBot
         connect_host = original_host
         use_ip = false
 
-        # Only use IPv4 for hosts known to have IPv6 issues
-        should_use_ipv4 = prefer_ipv4.nil? ? IPV4_REQUIRED_HOSTS.include?(original_host) : prefer_ipv4
+        # Use IPv4 for hosts known to have IPv6 issues or DNS fallback hosts
+        should_use_ipv4 = prefer_ipv4.nil? ?
+          (IPV4_REQUIRED_HOSTS.include?(original_host) || DNS_FALLBACKS.key?(original_host)) :
+          prefer_ipv4
 
         if should_use_ipv4 && !ip_address?(original_host)
           begin
@@ -105,11 +111,16 @@ module ArbitrageBot
         http.open_timeout = timeout
 
         # When connecting via IP, we need to:
-        # 1. Disable hostname verification (we verified the IP ourselves)
-        # 2. But still verify the certificate chain
+        # 1. Set SNI to original hostname for proper TLS handshake
+        # 2. Disable hostname verification (IP won't match cert)
         # 3. Store original host for Host header
         if use_ip && http.use_ssl?
+          # Set SNI hostname - critical for TLS
+          http.instance_variable_set(:@ssl_hostname, original_host)
+
+          # Disable hostname verification since we're connecting by IP
           http.verify_hostname = false if http.respond_to?(:verify_hostname=)
+
           # Store original host for callers that need it for Host header
           http.instance_variable_set(:@original_host, original_host)
           class << http
@@ -132,7 +143,8 @@ module ArbitrageBot
         addrs = Socket.getaddrinfo(hostname, nil, Socket::AF_INET)
         addrs.first&.dig(3)
       rescue SocketError
-        nil
+        # Use hardcoded fallback if DNS fails
+        DNS_FALLBACKS[hostname]
       end
     end
   end

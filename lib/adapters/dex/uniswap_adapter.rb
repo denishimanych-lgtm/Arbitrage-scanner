@@ -5,7 +5,10 @@ module ArbitrageBot
     module Dex
       class UniswapAdapter < BaseAdapter
         # Using Uniswap subgraph for pool discovery
-        SUBGRAPH_URL = 'https://api.thegraph.com/subgraphs/name/uniswap/uniswap-v3'
+        # Note: The Graph hosted service is deprecated, using gateway requires API key
+        # Set THEGRAPH_API_KEY env variable for full functionality
+        SUBGRAPH_URL_TEMPLATE = 'https://gateway.thegraph.com/api/%s/subgraphs/id/5zvR82QoaXYFyDEKLZ9t6v9adgnptxYpKpSbxtgVENFV'
+        FALLBACK_SUBGRAPH_URL = 'https://api.thegraph.com/subgraphs/name/uniswap/uniswap-v3'  # May return 301
         QUOTE_API_URL = 'https://api.uniswap.org/v2'
 
         WETH = '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2'
@@ -100,7 +103,18 @@ module ArbitrageBot
         private
 
         def graphql_query(query)
-          post(SUBGRAPH_URL, body: { query: query })
+          url = subgraph_url
+          post(url, body: { query: query })
+        end
+
+        def subgraph_url
+          api_key = ENV['THEGRAPH_API_KEY']
+          if api_key && !api_key.empty?
+            format(SUBGRAPH_URL_TEMPLATE, api_key)
+          else
+            ArbitrageBot.logger.warn('[Uniswap] THEGRAPH_API_KEY not set, using fallback (may be rate limited)')
+            FALLBACK_SUBGRAPH_URL
+          end
         end
 
         def find_pools(token_a, token_b)

@@ -13,10 +13,18 @@ module ArbitrageBot
                 button("📈 Top Spreads", CallbackData.encode(:nav, :top))
               ),
               row(
-                button("⚙️ Settings", CallbackData.encode(:nav, :settings)),
-                button("🚫 Blacklist", CallbackData.encode(:nav, :blacklist))
+                button("💰 Funding", CallbackData.encode(:nav, :funding)),
+                button("📊 Z-Score", CallbackData.encode(:nav, :zscores)),
+                button("💵 Stables", CallbackData.encode(:nav, :stables))
               ),
-              row(pause_resume_button)
+              row(
+                button("📈 Stats", CallbackData.encode(:nav, :stats)),
+                button("⚙️ Settings", CallbackData.encode(:nav, :settings))
+              ),
+              row(
+                button("🚫 Blacklist", CallbackData.encode(:nav, :blacklist)),
+                pause_resume_button
+              )
             ]
           end
 
@@ -30,6 +38,10 @@ module ArbitrageBot
 
               📊 Status - System health and statistics
               📈 Top Spreads - Current best opportunities
+              💰 Funding - Current funding rates
+              📊 Z-Score - Statistical arbitrage monitor
+              💵 Stables - Stablecoin depeg monitor
+              📈 Stats - Trading statistics
               ⚙️ Settings - Configure thresholds
               🚫 Blacklist - Manage blocked symbols
             MSG

@@ -47,6 +47,7 @@ module ArbitrageBot
         if @blacklist.blocked?(raw_signal)
           log("  Blocked by blacklist: #{symbol}")
           record_stat(:blacklist_blocked)
+          log_rejected_signal(raw_signal, 'blacklisted')
           return nil
         end
 
@@ -56,6 +57,7 @@ module ArbitrageBot
           log("  On cooldown: #{symbol} (#{remaining}s remaining)")
           @cooldown.record_blocked
           record_stat(:cooldown_blocked)
+          log_rejected_signal(raw_signal, 'cooldown')
           return nil
         end
 
@@ -66,13 +68,16 @@ module ArbitrageBot
         unless signal_type_enabled?(validated_signal.signal_type)
           log("  Signal type disabled: #{validated_signal.signal_type}")
           record_stat(:type_disabled)
+          log_rejected_signal(raw_signal, "signal_type_disabled:#{validated_signal.signal_type}", validated_signal)
           return nil
         end
 
         # 5. Check if passed safety checks
         unless validated_signal.status == :valid || validated_signal.signal_type == :lagging
+          rejection_reason = validated_signal.safety_checks[:messages]&.first || 'safety_check_failed'
           log("  Failed safety checks: #{validated_signal.safety_checks[:messages]&.join(', ')}")
           record_stat(:safety_failed)
+          log_rejected_signal(raw_signal, rejection_reason, validated_signal)
           return nil
         end
 
@@ -80,28 +85,44 @@ module ArbitrageBot
         if validated_signal.spread[:real_pct] < @settings[:min_spread_pct]
           log("  Spread too low: #{validated_signal.spread[:real_pct]}% < #{@settings[:min_spread_pct]}%")
           record_stat(:spread_too_low)
+          log_rejected_signal(raw_signal, "spread_too_low:#{validated_signal.spread[:real_pct]}%", validated_signal)
           return nil
         end
 
-        # 7. Format alert
-        formatted_message = @formatter.format(validated_signal)
+        # 7. Create signal in PostgreSQL
+        db_signal = create_db_signal(validated_signal, raw_signal)
+        strategy = infer_strategy(validated_signal, raw_signal)
+        signal_id = db_signal ? Services::Analytics::SignalRepository.short_id(db_signal[:id], strategy) : nil
 
-        # 8. Send to Telegram
+        # 8. Format alert (with signal ID)
+        formatted_message = @formatter.format(validated_signal)
+        formatted_message = append_signal_id(formatted_message, signal_id) if signal_id
+
+        # 9. Send to Telegram
         result = @notifier.send_alert(formatted_message)
 
         if result
-          # 9. Set cooldown
+          # 10. Update signal with telegram message ID
+          if db_signal && result.is_a?(Hash) && result['result']
+            msg_id = result.dig('result', 'message_id')
+            Services::Analytics::SignalRepository.update_telegram_msg_id(db_signal[:id], msg_id) if msg_id
+          end
+
+          # 11. Log spread to PostgreSQL
+          log_spread_to_db(validated_signal, raw_signal, db_signal)
+
+          # 12. Set cooldown
           cooldown_duration = validated_signal.signal_type == :lagging ?
             @settings[:lagging_alert_cooldown_seconds] :
             @settings[:alert_cooldown_seconds]
 
           @cooldown.set_cooldown(symbol, pair_id: raw_signal['pair_id'], seconds: cooldown_duration)
 
-          # 10. Record success
+          # 13. Record success
           record_processed(validated_signal)
           record_stat(:alerts_sent)
 
-          log("  Alert sent: #{validated_signal.id} (#{validated_signal.signal_type})")
+          log("  Alert sent: #{signal_id || validated_signal.id} (#{validated_signal.signal_type})")
 
           validated_signal
         else
@@ -210,6 +231,119 @@ module ArbitrageBot
 
       def record_stat(stat)
         @redis.hincrby(STATS_KEY, stat.to_s, 1)
+      end
+
+      def create_db_signal(validated_signal, raw_signal)
+        strategy = infer_strategy(validated_signal, raw_signal)
+        signal_class = infer_signal_class(strategy)
+
+        Services::Analytics::SignalRepository.create(
+          strategy: strategy,
+          class: signal_class,
+          symbol: validated_signal.symbol,
+          details: {
+            spread_pct: validated_signal.spread[:real_pct],
+            buy_venue: validated_signal.buy[:venue],
+            sell_venue: validated_signal.sell[:venue],
+            buy_price: validated_signal.buy[:price],
+            sell_price: validated_signal.sell[:price],
+            signal_type: validated_signal.signal_type,
+            suggested_position_usd: validated_signal.suggested_position_usd
+          }
+        )
+      rescue StandardError => e
+        @logger.error("[AlertJob] Failed to create DB signal: #{e.message}")
+        nil
+      end
+
+      def infer_strategy(validated_signal, raw_signal)
+        # Determine strategy based on venues and signal characteristics
+        buy_venue = validated_signal.buy[:venue].to_s.downcase
+        sell_venue = validated_signal.sell[:venue].to_s.downcase
+
+        # Check if it involves perpetual futures (hedged)
+        is_perp = buy_venue.include?('perp') || buy_venue.include?('futures') ||
+                  sell_venue.include?('perp') || sell_venue.include?('futures')
+
+        if is_perp
+          'spatial_hedged'
+        else
+          'spatial_manual'
+        end
+      end
+
+      def infer_signal_class(strategy)
+        case strategy
+        when 'spatial_hedged', 'funding', 'funding_spread'
+          'risk_premium'
+        else
+          'speculative'
+        end
+      end
+
+      def append_signal_id(message, signal_id)
+        "#{message}\n\nID: `#{signal_id}`\n/taken #{signal_id}"
+      end
+
+      def log_spread_to_db(validated_signal, raw_signal, db_signal)
+        Services::Analytics::PostgresLogger.log_spread(
+          symbol: validated_signal.symbol,
+          strategy: infer_strategy(validated_signal, raw_signal),
+          low_venue: validated_signal.buy[:venue],
+          high_venue: validated_signal.sell[:venue],
+          low_price: validated_signal.buy[:price],
+          high_price: validated_signal.sell[:price],
+          spread_pct: validated_signal.spread[:real_pct],
+          net_spread_pct: validated_signal.spread[:net_pct],
+          liquidity_usd: validated_signal.suggested_position_usd,
+          passed_validation: true,
+          signal_id: db_signal&.dig(:id)
+        )
+      rescue StandardError => e
+        @logger.error("[AlertJob] Failed to log spread to DB: #{e.message}")
+      end
+
+      def log_rejected_signal(raw_signal, rejection_reason, validated_signal = nil)
+        symbol = raw_signal['symbol'] || raw_signal[:symbol]
+
+        if validated_signal
+          Services::Analytics::PostgresLogger.log_spread(
+            symbol: symbol,
+            strategy: infer_strategy(validated_signal, raw_signal),
+            low_venue: validated_signal.buy[:venue],
+            high_venue: validated_signal.sell[:venue],
+            low_price: validated_signal.buy[:price],
+            high_price: validated_signal.sell[:price],
+            spread_pct: validated_signal.spread[:real_pct],
+            net_spread_pct: validated_signal.spread[:net_pct],
+            liquidity_usd: validated_signal.suggested_position_usd,
+            passed_validation: false,
+            rejection_reason: rejection_reason[0..99],  # Truncate to 100 chars
+            signal_id: nil
+          )
+        else
+          # Log minimal info for early rejections (blacklist, cooldown)
+          buy_venue = raw_signal['buy_venue'] || raw_signal[:buy_venue] || 'unknown'
+          sell_venue = raw_signal['sell_venue'] || raw_signal[:sell_venue] || 'unknown'
+          spread_pct = raw_signal['spread_pct'] || raw_signal[:spread_pct] || 0
+
+          Services::Analytics::PostgresLogger.log_spread(
+            symbol: symbol,
+            strategy: 'unknown',
+            low_venue: buy_venue,
+            high_venue: sell_venue,
+            low_price: 0,
+            high_price: 0,
+            spread_pct: spread_pct.to_f,
+            net_spread_pct: nil,
+            liquidity_usd: nil,
+            passed_validation: false,
+            rejection_reason: rejection_reason[0..99],
+            signal_id: nil
+          )
+        end
+      rescue StandardError => e
+        @logger.debug("[AlertJob] Failed to log rejected signal: #{e.message}")
       end
     end
   end

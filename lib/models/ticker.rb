@@ -71,11 +71,12 @@ module ArbitrageBot
       end
 
       # Add a DEX spot venue
-      def add_dex_spot(dex:, chain:, pool_address: nil, has_liquidity: true, liquidity_usd: nil)
+      def add_dex_spot(dex:, chain:, contract: nil, pool_address: nil, has_liquidity: true, liquidity_usd: nil)
         @venues[:dex_spot] ||= []
         @venues[:dex_spot] << {
           dex: dex,
           chain: chain,
+          contract: contract,
           pool_address: pool_address,
           has_liquidity: has_liquidity,
           liquidity_usd: liquidity_usd

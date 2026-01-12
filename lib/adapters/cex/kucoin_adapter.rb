@@ -80,6 +80,9 @@ module ArbitrageBot
           result = {}
           data['data']['ticker'].each do |t|
             next unless t['symbol'].end_with?('-USDT')
+            # Skip entries with missing price data
+            next if t['buy'].to_s.empty? || t['sell'].to_s.empty? || t['last'].to_s.empty?
+
             futures_symbol = "#{t['symbol'].gsub('-USDT', '')}USDTM"
             next if symbols && !symbols.include?(futures_symbol)
             result[futures_symbol] = {
