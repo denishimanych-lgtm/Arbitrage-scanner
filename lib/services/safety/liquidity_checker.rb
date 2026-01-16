@@ -122,9 +122,13 @@ module ArbitrageBot
         end
 
         # Check 2: Position to exit liquidity ratio
+        # Uses suggested_position_usd (adjusted for liquidity), not the fixed position_size_usd
         def check_position_ratio(signal)
           exit_liquidity = signal.dig(:liquidity, :exit_usd) || signal.dig('liquidity', 'exit_usd') || 0
-          position_size = signal[:position_size_usd] || signal['position_size_usd'] || @settings[:min_position_size_usd]
+          # Use suggested_position (already adjusted for liquidity) instead of fixed position_size
+          position_size = signal[:suggested_position_usd] || signal['suggested_position_usd'] ||
+                          signal[:position_size_usd] || signal['position_size_usd'] ||
+                          @settings[:min_position_size_usd]
           threshold = @settings[:max_position_to_exit_ratio]
 
           return CheckResult.new(
@@ -203,6 +207,24 @@ module ArbitrageBot
           # Get venue IDs
           low_venue_id = venue_id(low_venue)
           high_venue_id = venue_id(high_venue)
+
+          # Check if we have enough history samples
+          min_samples = @settings[:min_history_samples] || 10
+          low_stats = @depth_history.stats(pair_id, low_venue_id, :bids)
+          high_stats = @depth_history.stats(pair_id, high_venue_id, :asks)
+
+          # Pass if we don't have enough samples yet
+          low_samples = low_stats&.samples || 0
+          high_samples = high_stats&.samples || 0
+          if low_samples < min_samples && high_samples < min_samples
+            return CheckResult.new(
+              passed: true,
+              check_name: :depth_vs_history,
+              message: "Insufficient history (#{[low_samples, high_samples].max}/#{min_samples} samples)",
+              value: nil,
+              threshold: @settings[:min_depth_vs_history_ratio]
+            )
+          end
 
           # Check ratios for both venues
           ratios = []
@@ -355,7 +377,9 @@ module ArbitrageBot
           )
         end
 
-        # Check 10: High venue must be shortable for valid arbitrage
+        # Check 10: Validate arbitrage direction
+        # For hedged arb: high venue must be shortable (futures/perp)
+        # For manual arb: high venue is spot, requires token transfer - also valid
         def check_direction_validity(signal)
           return CheckResult.new(
             passed: true,
@@ -366,17 +390,44 @@ module ArbitrageBot
           ) unless @settings[:require_shortable_high_venue]
 
           high_venue = signal[:high_venue] || signal['high_venue'] || {}
-          venue_type = (high_venue[:type] || high_venue['type'])&.to_sym
+          low_venue = signal[:low_venue] || signal['low_venue'] || {}
+          high_type = (high_venue[:type] || high_venue['type'])&.to_sym
+          low_type = (low_venue[:type] || low_venue['type'])&.to_sym
 
-          shortable = SHORTABLE_VENUE_TYPES.include?(venue_type)
+          high_shortable = SHORTABLE_VENUE_TYPES.include?(high_type)
+          low_shortable = SHORTABLE_VENUE_TYPES.include?(low_type)
 
-          CheckResult.new(
-            passed: shortable,
-            check_name: :direction_validity,
-            message: shortable ? 'High venue is shortable' : "Cannot short on #{venue_type} venue",
-            value: venue_type,
-            threshold: SHORTABLE_VENUE_TYPES
-          )
+          # Hedged arbitrage: at least one venue must be shortable
+          # Manual arbitrage: both venues are spot - requires physical token transfer
+          if high_shortable
+            # High venue is shortable - hedged arb (can short on sell side)
+            CheckResult.new(
+              passed: true,
+              check_name: :direction_validity,
+              message: 'Hedged arbitrage: high venue is shortable',
+              value: high_type,
+              threshold: SHORTABLE_VENUE_TYPES
+            )
+          elsif low_shortable
+            # Low venue is shortable, high is spot - inverted hedged arb
+            CheckResult.new(
+              passed: true,
+              check_name: :direction_validity,
+              message: 'Hedged arbitrage: low venue is shortable',
+              value: low_type,
+              threshold: SHORTABLE_VENUE_TYPES
+            )
+          else
+            # Neither venue is shortable - manual arbitrage (spot-to-spot)
+            # This is valid but requires token transfer
+            CheckResult.new(
+              passed: true,
+              check_name: :direction_validity,
+              message: 'Manual arbitrage: requires token transfer',
+              value: "#{low_type}->#{high_type}",
+              threshold: :manual_transfer
+            )
+          end
         end
 
         # Check 11: Deposit/withdraw status for manual arbitrage

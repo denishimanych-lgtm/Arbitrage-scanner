@@ -110,6 +110,11 @@ module ArbitrageBot
 
       # Step 3: Fetch contract addresses
       def fetch_contract_addresses
+        if ENV['SKIP_CONTRACT_FETCH']
+          log('Contract fetching skipped (SKIP_CONTRACT_FETCH=1)')
+          return
+        end
+
         log('Fetching contract addresses...')
 
         fetcher = Services::ContractFetcher.new

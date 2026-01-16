@@ -27,6 +27,8 @@ ARGV.each do |arg|
     options[:alerts] = false
   when '--no-telegram'
     options[:telegram_bot] = false
+  when '--no-discovery'
+    options[:discovery] = false
   when '--debug'
     ArbitrageBot.logger.level = Logger::DEBUG
   when '--help', '-h'
@@ -37,6 +39,7 @@ ARGV.each do |arg|
 
       Options:
         --discovery-only  Run only ticker discovery (no monitoring)
+        --no-discovery    Skip ticker discovery (use cached tickers)
         --no-alerts       Disable alert sending to Telegram
         --no-telegram     Disable Telegram bot commands
         --debug           Enable debug logging

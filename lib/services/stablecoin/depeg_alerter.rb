@@ -12,6 +12,25 @@ module ArbitrageBot
         ALERT_THRESHOLD = 0.99        # Alert when < $0.99
         ENTRY_HINT_THRESHOLD = 0.97   # Entry hint when < $0.97
 
+        # Exchange trading URLs
+        EXCHANGE_URLS = {
+          'binance' => {
+            spot: 'https://www.binance.com/en/trade/%{symbol}_USDT'
+          },
+          'bybit' => {
+            spot: 'https://www.bybit.com/en/trade/spot/%{symbol}/USDT'
+          },
+          'okx' => {
+            spot: 'https://www.okx.com/trade-spot/%{symbol}-usdt'
+          },
+          'gate' => {
+            spot: 'https://www.gate.io/trade/%{symbol}_USDT'
+          },
+          'kucoin' => {
+            spot: 'https://www.kucoin.com/trade/%{symbol}-USDT'
+          }
+        }.freeze
+
         def initialize(settings = {})
           @logger = ArbitrageBot.logger
           @notifier = Telegram::TelegramNotifier.new
@@ -97,6 +116,13 @@ module ArbitrageBot
           symbol = price_data[:symbol]
           price = price_data[:price]
           deviation = price_data[:deviation_pct]
+
+          # Price should always be valid at this point - if not, it's a bug
+          if price.nil? || price <= 0
+            @logger.error("[DepegAlerter] BUG: Invalid price for #{symbol}: #{price} - check price fetching!")
+            return nil
+          end
+
           is_severe = price < ENTRY_HINT_THRESHOLD
 
           emoji = is_severe ? "🚨🚨" : "🚨"
@@ -105,29 +131,51 @@ module ArbitrageBot
           direction = price < 1.0 ? "BELOW PEG" : "ABOVE PEG"
           dev_str = deviation >= 0 ? "+#{deviation}%" : "#{deviation}%"
 
+          # Position sizing
+          position_usd = 10_000
+          position_tokens = price > 0 ? (position_usd / price).round(2) : 0
+
+          # Expected profit if re-peg
+          discount_pct = ((1.0 - price) * 100).abs.round(2)
+          expected_profit = (position_usd * discount_pct / 100).round(0)
+
+          # Get liquidity info
+          liquidity = get_stablecoin_liquidity(symbol)
+          liquidity_section = format_liquidity_section(liquidity, position_usd)
+
           # Get Curve 3pool status
           curve_section = get_curve_section(symbol)
+
+          # Get trading links
+          links_section = format_trading_links(symbol)
 
           message = <<~MSG
             #{emoji} #{severity} | #{symbol} | $#{price.round(4)}
             ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-            📉 STATUS: #{direction}
-               Price: $#{price.round(6)}
-               Deviation: #{dev_str}
-               Source: #{price_data[:source]}
+            📉 СТАТУС: #{direction}
+               Цена: $#{price.round(6)}
+               Отклонение: #{dev_str}
+               Источник: #{price_data[:source]}
 
             #{curve_section}
-            💡 СТРАТЕГИЯ:
-               #{strategy_text(symbol, price, is_severe)}
+            💰 ПОЗИЦИЯ ($#{format_number(position_usd)}):
+            • #{format_tokens(position_tokens)} #{symbol} @ $#{format_price(price)}
 
-            ⚠️ КЛАСС: Speculative (event-driven)
-               Risk: Complete collapse possible
-               #{is_severe ? '🛑 EXTREME CAUTION' : '⚠️ High risk'}
+            💹 ОЖИДАЕМАЯ ПРИБЫЛЬ (при re-peg):
+            • Discount: #{discount_pct}%
+            • Profit: ~$#{expected_profit}
+
+            #{liquidity_section}
+            📝 ИНСТРУКЦИЯ:
+            #{strategy_instructions(symbol, price, is_severe, position_tokens)}
 
             📍 ВЫХОД:
-               • Price returns to $0.995+
-               • Or cut loss at -#{is_severe ? '5' : '3'}%
+            • Take profit: цена > $0.995
+            • Stop loss: -#{is_severe ? '5' : '3'}% от входа
+            #{is_severe ? '⚠️ EXTREME CAUTION - возможен полный коллапс!' : ''}
+
+            #{links_section}
           MSG
 
           {
@@ -136,6 +184,7 @@ module ArbitrageBot
             price: price,
             deviation_pct: deviation,
             source: price_data[:source],
+            position_usd: position_usd,
             message: message.strip
           }
         end
@@ -202,6 +251,108 @@ module ArbitrageBot
         rescue StandardError => e
           @logger.debug("[DepegAlerter] get_curve_section error: #{e.message}")
           ""
+        end
+
+        def strategy_instructions(symbol, price, is_severe, position_tokens)
+          if price < 1.0
+            if is_severe
+              <<~INST.strip
+                1. Купить #{format_tokens(position_tokens)} #{symbol} @ $#{format_price(price)}
+                2. ⚠️ ТОЛЬКО на сумму, которую готов потерять!
+                3. Ждать re-peg или stop loss
+              INST
+            else
+              <<~INST.strip
+                1. Рассмотреть покупку #{format_tokens(position_tokens)} #{symbol}
+                2. Дождаться подтверждения re-peg или доп. слабости
+                3. Выход при $0.995+ или stop loss
+              INST
+            end
+          else
+            <<~INST.strip
+              1. Продать #{format_tokens(position_tokens)} #{symbol} @ $#{format_price(price)}
+              2. Или арбитраж vs другие стейблкоины
+            INST
+          end
+        end
+
+        def get_stablecoin_liquidity(symbol)
+          # Try to get liquidity from major exchanges
+          liquidity = { total_bids: 0, total_asks: 0 }
+
+          %w[binance bybit okx].each do |exchange|
+            key = "orderbook:#{exchange}_spot:#{symbol}"
+            data = ArbitrageBot.redis.get(key)
+            next unless data
+
+            ob = JSON.parse(data, symbolize_names: true)
+            liquidity[:total_bids] += ob[:bids_usd].to_f if ob[:bids_usd]
+            liquidity[:total_asks] += ob[:asks_usd].to_f if ob[:asks_usd]
+          rescue StandardError
+            next
+          end
+
+          liquidity[:total_bids] > 0 || liquidity[:total_asks] > 0 ? liquidity : nil
+        rescue StandardError
+          nil
+        end
+
+        def format_liquidity_section(liquidity, position_usd)
+          return "" unless liquidity
+
+          bids_usd = liquidity[:total_bids].to_f
+          asks_usd = liquidity[:total_asks].to_f
+          min_liq = [bids_usd, asks_usd].min
+          ratio = position_usd > 0 && min_liq > 0 ? ((min_liq / position_usd) * 100).round(0) : 0
+
+          return "" if bids_usd == 0 && asks_usd == 0
+
+          <<~LIQ
+            💧 ЛИКВИДНОСТЬ ВЫХОДА:
+            • Bids: $#{format_number(bids_usd)}
+            • Asks: $#{format_number(asks_usd)}
+            • Позиция vs ликвидность: #{ratio}% #{ratio >= 100 ? "✅" : "⚠️"}
+
+          LIQ
+        end
+
+        def format_tokens(tokens)
+          tokens = tokens.to_f
+          if tokens >= 1_000_000
+            "#{(tokens / 1_000_000).round(2)}M"
+          elsif tokens >= 1_000
+            "#{(tokens / 1_000).round(2)}K"
+          else
+            tokens.round(2).to_s
+          end
+        end
+
+        def format_price(price)
+          return '0' unless price
+          price = price.to_f
+          sprintf('%.4f', price)
+        end
+
+        def format_number(num)
+          return '0' unless num
+          num = num.to_f
+          if num >= 1_000_000
+            "#{(num / 1_000_000).round(1)}M"
+          elsif num >= 1_000
+            "#{(num / 1_000).round(1)}K"
+          else
+            num.round(0).to_s
+          end
+        end
+
+        def format_trading_links(symbol)
+          # Show only one exchange link (Binance preferred)
+          exchange = 'binance'
+          url_template = EXCHANGE_URLS.dig(exchange, :spot)
+          return "" unless url_template
+
+          url = url_template.gsub('%{symbol}', symbol.upcase)
+          "🔗 ТОРГОВАТЬ: #{url}"
         end
       end
     end

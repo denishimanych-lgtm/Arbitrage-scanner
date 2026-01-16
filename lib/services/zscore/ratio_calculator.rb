@@ -99,11 +99,7 @@ module ArbitrageBot
         def fetch_from_binance(symbol)
           uri = URI("https://api.binance.com/api/v3/ticker/price?symbol=#{symbol}USDT")
 
-          http = Net::HTTP.new(uri.host, uri.port)
-          http.use_ssl = true
-          http.open_timeout = 5
-          http.read_timeout = 5
-
+          http = Support::SslConfig.create_http(uri, timeout: 5)
           response = http.get(uri.request_uri)
           return nil unless response.code == '200'
 

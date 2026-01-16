@@ -89,6 +89,12 @@ module ArbitrageBot
         @stablecoin_job = Jobs::StablecoinMonitorJob.new(@settings)
       end
 
+      # Always enable convergence tracking if alerts are enabled
+      if @options[:alerts]
+        @convergence_job = Jobs::ConvergenceCheckJob.new(@settings)
+        @position_check_job = Jobs::PositionCheckJob.new
+      end
+
       if @options[:telegram_bot]
         @telegram_bot = Services::Telegram::Bot.new(orchestrator: self)
       end
@@ -187,6 +193,32 @@ module ArbitrageBot
           end
         end
         log('Started stablecoin monitor')
+      end
+
+      # Convergence tracking worker thread
+      if @options[:alerts] && @convergence_job
+        @threads[:convergence] = Thread.new do
+          Thread.current.name = 'convergence'
+          begin
+            @convergence_job.run_loop
+          rescue StandardError => e
+            log("Convergence check error: #{e.message}", :error)
+          end
+        end
+        log('Started convergence tracker')
+      end
+
+      # Position tracking worker thread (for close notifications)
+      if @options[:alerts] && @position_check_job
+        @threads[:position_check] = Thread.new do
+          Thread.current.name = 'position_check'
+          begin
+            @position_check_job.run_loop
+          rescue StandardError => e
+            log("Position check error: #{e.message}", :error)
+          end
+        end
+        log('Started position tracker')
       end
 
       # Telegram bot thread

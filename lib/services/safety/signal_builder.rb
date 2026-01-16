@@ -11,6 +11,8 @@ module ArbitrageBot
           :timing, :position_size_usd, :suggested_position_usd,
           :safety_checks, :lagging_info, :fees_estimate,
           :actions, :links, :created_at, :status,
+          :volatility_buffer,  # For manual arbitrage safety
+          :transfer_status,    # Deposit/withdraw status for manual arbitrage
           keyword_init: true
         )
 
@@ -38,6 +40,8 @@ module ArbitrageBot
           @settings = settings
           @liquidity_checker = LiquidityChecker.new(settings[:liquidity] || settings)
           @lagging_detector = LaggingExchangeDetector.new(settings[:lagging] || settings)
+          @volatility_buffer = VolatilityBuffer.new
+          @deposit_withdraw_checker = DepositWithdrawChecker.new
           @logger = ArbitrageBot.logger
         end
 
@@ -47,6 +51,12 @@ module ArbitrageBot
         def build(raw_signal)
           # Run safety checks
           validation = @liquidity_checker.validate(raw_signal)
+
+          # Debug: log validation failures
+          unless validation.passed?
+            failed_names = validation.failed_checks.map { |c| "#{c.check_name}: #{c.message}" }.join(', ')
+            @logger.debug("[SignalBuilder] Validation failed: #{failed_names}")
+          end
 
           # Detect lagging
           lagging = @lagging_detector.detect_for_signal(raw_signal)
@@ -58,8 +68,9 @@ module ArbitrageBot
           # Calculate fees and net profit
           fees = estimate_fees(raw_signal)
 
-          # Get suggested position
-          suggested_position = @liquidity_checker.suggest_position_size(raw_signal)
+          # Get suggested position - prefer pre-calculated from orderbook analysis
+          suggested_position = raw_signal[:suggested_position_usd] || raw_signal['suggested_position_usd'] ||
+                               @liquidity_checker.suggest_position_size(raw_signal)
 
           # Build action instructions
           actions = build_actions(raw_signal, signal_type)
@@ -69,6 +80,21 @@ module ArbitrageBot
 
           # Build strategy ID
           strategy_id = build_strategy_id(raw_signal, strategy_type)
+
+          # Calculate volatility buffer for manual signals
+          vol_buffer = if signal_type == :manual
+                         symbol = raw_signal[:symbol] || raw_signal['symbol']
+                         spread_pct = raw_signal.dig(:spread, :real_pct) ||
+                                      raw_signal.dig('spread', 'real_pct') ||
+                                      raw_signal[:spread_pct] || raw_signal['spread_pct'] || 0
+                         @volatility_buffer.validate_spread(symbol, spread_pct.to_f)
+                       end
+
+          # Check transfer status for manual signals (spot-spot requires token transfer)
+          # Also check for any signal where both venues are spot (even if one is DEX)
+          transfer_status = if needs_transfer_check?(raw_signal, signal_type)
+                              check_transfer_status(raw_signal)
+                            end
 
           ValidatedSignal.new(
             id: strategy_id,
@@ -90,7 +116,9 @@ module ArbitrageBot
             actions: actions,
             links: links,
             created_at: Time.now.to_i,
-            status: validation.passed? ? :valid : :failed
+            status: validation.passed? ? :valid : :failed,
+            volatility_buffer: vol_buffer,
+            transfer_status: transfer_status
           )
         end
 
@@ -150,13 +178,18 @@ module ArbitrageBot
 
         def build_prices(raw_signal)
           prices = raw_signal[:prices] || raw_signal['prices'] || {}
+          buy_price = (prices[:buy_price] || prices['buy_price']).to_f
+          sell_price = (prices[:sell_price] || prices['sell_price']).to_f
+
           {
-            buy_price: prices[:buy_price] || prices['buy_price'],
-            sell_price: prices[:sell_price] || prices['sell_price'],
+            buy_price: buy_price,
+            sell_price: sell_price,
             buy_slippage_pct: prices[:buy_slippage_pct] || prices['buy_slippage_pct'],
             sell_slippage_pct: prices[:sell_slippage_pct] || prices['sell_slippage_pct'],
-            delta: (prices[:sell_price] || prices['sell_price']).to_f -
-                   (prices[:buy_price] || prices['buy_price']).to_f
+            delta: sell_price - buy_price,
+            # Best prices from orderbook (for verification against exchanges)
+            best_ask_low: prices[:best_ask_low] || prices['best_ask_low'],
+            best_bid_high: prices[:best_bid_high] || prices['best_bid_high']
           }
         end
 
@@ -182,7 +215,11 @@ module ArbitrageBot
           {
             exit_usd: liquidity[:exit_usd] || liquidity['exit_usd'],
             low_bids_usd: liquidity[:low_bids_usd] || liquidity['low_bids_usd'],
-            high_asks_usd: liquidity[:high_asks_usd] || liquidity['high_asks_usd']
+            high_asks_usd: liquidity[:high_asks_usd] || liquidity['high_asks_usd'],
+            # Max entry size based on orderbook depth within slippage limit
+            max_entry_usd: liquidity[:max_entry_usd] || liquidity['max_entry_usd'],
+            max_buy_usd: liquidity[:max_buy_usd] || liquidity['max_buy_usd'],
+            max_sell_usd: liquidity[:max_sell_usd] || liquidity['max_sell_usd']
           }
         end
 
@@ -388,6 +425,71 @@ module ArbitrageBot
             "#{dex&.capitalize} DEX"
           else
             'Unknown'
+          end
+        end
+
+        # Check if signal requires transfer status check (spot-spot pairs)
+        # @param raw_signal [Hash] signal data
+        # @param signal_type [Symbol] signal type
+        # @return [Boolean]
+        def needs_transfer_check?(raw_signal, signal_type)
+          return true if signal_type == :manual
+
+          # Check if both venues involve spot trading (requires token transfer)
+          low_venue = raw_signal[:low_venue] || raw_signal['low_venue'] || {}
+          high_venue = raw_signal[:high_venue] || raw_signal['high_venue'] || {}
+
+          low_type = (low_venue[:type] || low_venue['type']).to_s
+          high_type = (high_venue[:type] || high_venue['type']).to_s
+
+          spot_types = %w[cex_spot dex_spot]
+          low_is_spot = spot_types.include?(low_type)
+          high_is_spot = spot_types.include?(high_type)
+
+          # Need transfer check if both are spot venues
+          low_is_spot && high_is_spot
+        end
+
+        # Check deposit/withdraw status for manual arbitrage
+        # @param raw_signal [Hash] signal data
+        # @return [Hash, nil] transfer status
+        def check_transfer_status(raw_signal)
+          symbol = raw_signal[:symbol] || raw_signal['symbol']
+          low_venue = raw_signal[:low_venue] || raw_signal['low_venue'] || {}
+          high_venue = raw_signal[:high_venue] || raw_signal['high_venue'] || {}
+
+          # Get exchange names
+          buy_exchange = low_venue[:exchange] || low_venue['exchange'] || low_venue[:dex] || low_venue['dex']
+          sell_exchange = high_venue[:exchange] || high_venue['exchange'] || high_venue[:dex] || high_venue['dex']
+
+          @logger.info("[SignalBuilder] check_transfer_status: #{symbol} buy=#{buy_exchange} sell=#{sell_exchange}")
+
+          unless buy_exchange && sell_exchange
+            @logger.info("[SignalBuilder] check_transfer_status: missing exchange - low_venue=#{low_venue.inspect}")
+            return nil
+          end
+
+          # For manual arbitrage: buy on low venue, transfer to high venue, sell
+          # So we need: withdraw from buy_exchange, deposit to sell_exchange
+          begin
+            validation = @deposit_withdraw_checker.validate_transfer_route(
+              symbol,
+              buy_exchange,
+              sell_exchange
+            )
+
+            # Also find best network
+            best_network = @deposit_withdraw_checker.best_transfer_network(
+              symbol,
+              buy_exchange,
+              sell_exchange
+            )
+
+            validation[:best_network] = best_network
+            validation
+          rescue StandardError => e
+            @logger.debug("[SignalBuilder] check_transfer_status error: #{e.message}")
+            { valid: nil, error: e.message }
           end
         end
       end

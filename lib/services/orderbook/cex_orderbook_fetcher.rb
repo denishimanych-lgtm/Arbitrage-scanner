@@ -21,11 +21,11 @@ module ArbitrageBot
         end
 
         # Fetch orderbook for a symbol
-        def fetch(exchange, symbol, depth: DEFAULT_DEPTH)
+        def fetch(exchange, symbol, depth: DEFAULT_DEPTH, market_type: nil)
           adapter = get_adapter(exchange)
 
           request_at = Time.now
-          response = adapter.orderbook(symbol, depth: depth)
+          response = adapter.orderbook(symbol, depth: depth, market_type: market_type)
           response_at = Time.now
 
           latency_ms = ((response_at - request_at) * 1000).round

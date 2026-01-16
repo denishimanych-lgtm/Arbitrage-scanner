@@ -107,24 +107,45 @@ module ArbitrageBot
             auto_enabled = settings[:enable_auto_signals]
             manual_enabled = settings[:enable_manual_signals]
             lagging_enabled = settings[:enable_lagging_signals]
+            funding_enabled = settings[:enable_funding_alerts] != false
+            zscore_enabled = settings[:enable_zscore_alerts] != false
+            stablecoin_enabled = settings[:enable_stablecoin_alerts] != false
 
             [
+              row(button("━━ SPATIAL ARBITRAGE ━━", CallbackData.encode(:act, :noop))),
               row(
                 button(
-                  "#{auto_enabled ? '✅' : '❌'} Auto Signals",
+                  "#{auto_enabled ? '✅' : '❌'} Hedged (Auto)",
                   CallbackData.encode(:tgl, :auto)
-                )
-              ),
-              row(
+                ),
                 button(
-                  "#{manual_enabled ? '✅' : '❌'} Manual Signals",
+                  "#{manual_enabled ? '✅' : '❌'} Manual",
                   CallbackData.encode(:tgl, :manual)
                 )
               ),
               row(
                 button(
-                  "#{lagging_enabled ? '✅' : '❌'} Lagging Signals",
+                  "#{lagging_enabled ? '✅' : '❌'} Lagging Exchange",
                   CallbackData.encode(:tgl, :lagging)
+                )
+              ),
+              row(button("━━ NEW STRATEGIES ━━", CallbackData.encode(:act, :noop))),
+              row(
+                button(
+                  "#{funding_enabled ? '✅' : '❌'} 💰 Funding Rate",
+                  CallbackData.encode(:tgl, :funding)
+                )
+              ),
+              row(
+                button(
+                  "#{zscore_enabled ? '✅' : '❌'} 📊 Z-Score (Stat Arb)",
+                  CallbackData.encode(:tgl, :zscore)
+                )
+              ),
+              row(
+                button(
+                  "#{stablecoin_enabled ? '✅' : '❌'} 💵 Stablecoin Depeg",
+                  CallbackData.encode(:tgl, :stablecoin)
                 )
               ),
               back_row
@@ -181,21 +202,26 @@ module ArbitrageBot
             <<~MSG
               🔔 Signal Types
 
-              Toggle which signal types to receive:
+              SPATIAL ARBITRAGE (CEX spread):
+              🔥 Hedged - Buy spot + Short futures (safe)
+              ⚠️ Manual - Requires manual transfer (risky)
+              ⏱️ Lagging - Slow exchange detection
 
-              ✅ Auto - Automated shortable signals
-              ✅ Manual - Manual execution signals
-              ❌ Lagging - Lagging exchange alerts (risky)
+              NEW STRATEGIES:
+              💰 Funding - High funding rate opportunities
+              📊 Z-Score - Statistical arbitrage (mean reversion)
+              💵 Stablecoin - Depeg event alerts
             MSG
           end
 
           # Liquidity settings menu
           def build_liquidity_menu
             min_liq = format_usd(settings[:min_liquidity_usd])
+            min_dex_liq = format_usd(settings[:min_dex_liquidity_usd] || 1000)
             min_exit = format_usd(settings[:min_exit_liquidity_usd])
 
             [
-              row(button("Min Liquidity: #{min_liq}", CallbackData.encode(:act, :noop))),
+              row(button("Min CEX Liquidity: #{min_liq}", CallbackData.encode(:act, :noop))),
               row(
                 button('$100K', CallbackData.encode(:set, :minliq, '100000')),
                 button('$250K', CallbackData.encode(:set, :minliq, '250000')),
@@ -204,6 +230,17 @@ module ArbitrageBot
               row(
                 button('$1M', CallbackData.encode(:set, :minliq, '1000000')),
                 button('$2M', CallbackData.encode(:set, :minliq, '2000000'))
+              ),
+              row(button("━━━━━━━━━━━━━━━━━━━━", CallbackData.encode(:act, :noop))),
+              row(button("Min DEX Pool: #{min_dex_liq}", CallbackData.encode(:act, :noop))),
+              row(
+                button('$1K', CallbackData.encode(:set, :dexliq, '1000')),
+                button('$5K', CallbackData.encode(:set, :dexliq, '5000')),
+                button('$10K', CallbackData.encode(:set, :dexliq, '10000'))
+              ),
+              row(
+                button('$25K', CallbackData.encode(:set, :dexliq, '25000')),
+                button('$50K', CallbackData.encode(:set, :dexliq, '50000'))
               ),
               row(button("━━━━━━━━━━━━━━━━━━━━", CallbackData.encode(:act, :noop))),
               row(button("Exit Liquidity: #{min_exit}", CallbackData.encode(:act, :noop))),
@@ -221,14 +258,16 @@ module ArbitrageBot
           end
 
           # Text for liquidity submenu
-          def self.build_liquidity_text(min_liq, min_exit)
+          def self.build_liquidity_text(min_liq, min_dex_liq, min_exit)
             <<~MSG
               💧 Liquidity Settings
 
-              Min Liquidity: $#{format('%<n>.0f', n: min_liq.to_f)}
+              Min CEX Liquidity: $#{format('%<n>.0f', n: min_liq.to_f)}
+              Min DEX Pool: $#{format('%<n>.0f', n: min_dex_liq.to_f)}
               Min Exit Liquidity: $#{format('%<n>.0f', n: min_exit.to_f)}
 
-              Min Liquidity - Minimum pool TVL required
+              Min CEX - Minimum CEX pool TVL required
+              Min DEX - Minimum DEX pool liquidity (filters dust pools)
               Exit Liquidity - Min orderbook depth for exits
             MSG
           end

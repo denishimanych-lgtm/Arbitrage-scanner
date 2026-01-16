@@ -20,13 +20,25 @@ module ArbitrageBot
           @cooldown_seconds = settings[:funding_alert_cooldown] || DEFAULT_COOLDOWN_SECONDS
           @logger = ArbitrageBot.logger
           @notifier = Telegram::TelegramNotifier.new
+          @settings_loader = SettingsLoader.new
+          @flip_detector = FundingFlipDetector.new
         end
 
         # Check rates and generate alerts
         # @param rates [Array<Hash>] funding rates from FundingCollector
         # @return [Array<Hash>] generated alerts
         def check_and_alert(rates)
+          # Check if funding alerts are enabled
+          settings = @settings_loader.load
+          unless settings[:enable_funding_alerts] != false
+            @logger.debug("[FundingAlerter] Funding alerts disabled in settings")
+            return []
+          end
+
           alerts = []
+
+          # Record all rates to history for flip detection
+          rates.each { |r| @flip_detector.record_rate(r) }
 
           # Group by symbol
           by_symbol = rates.group_by { |r| r[:symbol] }
@@ -41,7 +53,39 @@ module ArbitrageBot
             alerts << spread_alert if spread_alert
           end
 
+          # Check for funding flips (exit signals)
+          exit_signals = @flip_detector.check_for_exits(rates)
+          exit_signals.each do |signal|
+            alert = create_exit_alert(signal)
+            if alert && send_exit_alert(alert)
+              alerts << alert
+              # Deactivate position after exit alert
+              @flip_detector.deactivate_position(signal[:symbol], signal[:venue])
+            end
+          end
+
           alerts
+        end
+
+        # Activate position tracking (call after user enters position)
+        # @param symbol [String] trading symbol
+        # @param venue [String] venue name
+        def activate_position(symbol, venue)
+          @flip_detector.activate_position(symbol, venue)
+        end
+
+        # Get funding history analysis
+        # @param symbol [String] trading symbol
+        # @param venue [String] venue name
+        # @return [String] formatted history
+        def funding_history(symbol, venue)
+          @flip_detector.format_history(symbol, venue)
+        end
+
+        # Get active positions list
+        # @return [Array<String>] position keys
+        def active_positions
+          @flip_detector.get_active_positions
         end
 
         # Format all funding rates for display (menu view)
@@ -132,6 +176,8 @@ module ArbitrageBot
             if alert && send_alert(alert)
               alerts << alert
               log_alert(alert)
+              # Auto-activate position tracking for this symbol/venue
+              @flip_detector.activate_position(symbol, rate[:venue])
             end
           end
 
@@ -155,12 +201,107 @@ module ArbitrageBot
           end
         end
 
+        def create_exit_alert(signal)
+          symbol = signal[:symbol]
+          venue = signal[:venue]
+          current_rate = signal[:current_rate]
+          consecutive = signal[:consecutive_negatives]
+          avg_negative = signal[:avg_negative_rate]
+          history = signal[:history] || []
+
+          # Get current price
+          price = get_current_price(symbol)
+
+          # Format history section
+          history_lines = history.first(5).map.with_index do |h, i|
+            rate_pct = (h[:rate].to_f * 100).round(4)
+            emoji = h[:positive] ? '🟢' : '🔴'
+            "   #{emoji} #{rate_pct}%"
+          end.join("\n")
+
+          message = <<~MSG
+            🚨 FUNDING EXIT | #{symbol} | #{venue}
+            ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+            ⚠️ #{consecutive} CONSECUTIVE NEGATIVE PERIODS
+
+            📊 ТЕКУЩИЙ RATE:
+               #{format_rate(current_rate)}/8h (негативный)
+               Среднее за период: #{format_rate(avg_negative)}/8h
+
+            📈 ПОСЛЕДНИЕ ПЕРИОДЫ:
+            #{history_lines}
+
+            💰 РЕКОМЕНДАЦИЯ:
+            • Закрыть позицию #{symbol} на #{venue}
+            • Spot LONG → продать
+            • Perp SHORT → закрыть
+
+            ⏰ СРОЧНОСТЬ: ВЫСОКАЯ
+               Продолжение негативного funding = потери
+
+            📝 После закрытия отметьте:
+               /result [id] +X% или -X%
+          MSG
+
+          {
+            type: :funding_exit,
+            symbol: symbol,
+            venue: venue,
+            current_rate: current_rate,
+            consecutive_negatives: consecutive,
+            avg_negative_rate: avg_negative,
+            message: message.strip
+          }
+        end
+
+        def send_exit_alert(alert)
+          # Create signal in database
+          db_signal = Analytics::SignalRepository.create(
+            strategy: 'funding_exit',
+            class: 'risk_premium',
+            symbol: alert[:symbol],
+            details: alert.except(:message)
+          )
+
+          signal_id = db_signal ? Analytics::SignalRepository.short_id(db_signal[:id], 'funding_exit') : nil
+          message = alert[:message]
+          message = "#{message}\n\nID: `#{signal_id}`" if signal_id
+
+          result = @notifier.send_alert(message)
+
+          if result && db_signal && result.is_a?(Hash) && result['result']
+            msg_id = result.dig('result', 'message_id')
+            Analytics::SignalRepository.update_telegram_msg_id(db_signal[:id], msg_id) if msg_id
+          end
+
+          result
+        rescue StandardError => e
+          @logger.error("[FundingAlerter] send_exit_alert error: #{e.message}")
+          nil
+        end
+
         def create_high_funding_alert(symbol, rate, all_rates)
           sorted = all_rates.sort_by { |r| -r[:rate].to_f }
 
           # Get funding history
           history = get_funding_history(symbol, rate[:venue])
           history_section = format_history_section(history)
+
+          # Get current price and calculate position
+          position_usd = 10_000
+          price = get_current_price(symbol)
+          position_tokens = price && price > 0 ? (position_usd / price).round(4) : 0
+
+          # Calculate expected daily profit
+          rate_per_period = rate[:rate].to_f
+          periods_per_day = 3  # 8h periods
+          daily_profit_pct = rate_per_period * periods_per_day * 100
+          daily_profit_usd = (position_usd * daily_profit_pct / 100).round(2)
+
+          # Get liquidity info
+          liquidity = get_liquidity(symbol, rate[:venue])
+          liquidity_section = format_liquidity_section(liquidity, position_usd)
 
           message = <<~MSG
             💰 FUNDING | #{symbol} | #{format_rate(rate[:rate])}/8h
@@ -170,15 +311,20 @@ module ArbitrageBot
             #{sorted.first(4).map { |r| "   #{r[:venue]}: #{format_rate(r[:rate])} (#{r[:annualized_pct]}% APR)" }.join("\n")}
 
             #{history_section}
-            💡 СТРАТЕГИЯ:
-               LONG #{symbol} Spot + SHORT #{symbol} Perp (#{rate[:venue]})
+            💰 ПОЗИЦИЯ ($#{format_number(position_usd)}):
+            • #{format_tokens(position_tokens)} #{symbol} @ $#{format_price(price)}
+            • LONG #{symbol} Spot + SHORT #{symbol} Perp (#{rate[:venue]})
 
-            ⚠️ КЛАСС: Risk-premium capture
-               Риск: funding flip
+            💹 ОЖИДАЕМАЯ ПРИБЫЛЬ:
+            • ~#{daily_profit_pct.round(3)}%/день ($#{daily_profit_usd})
+            • ~#{rate[:annualized_pct]}% APR
 
-            📍 ВЫХОД:
-               • Funding < 0.01%
-               • 3 периода отрицательный
+            #{liquidity_section}
+            📝 ИНСТРУКЦИЯ:
+            1. Купить #{format_tokens(position_tokens)} #{symbol} на споте
+            2. Открыть SHORT #{format_tokens(position_tokens)} #{symbol} на #{rate[:venue]}
+            3. Собирать funding каждые 8 часов
+            4. Выход при funding < 0.01% или 3 отрицательных периода
           MSG
 
           {
@@ -188,12 +334,24 @@ module ArbitrageBot
             rate: rate[:rate],
             annualized_pct: rate[:annualized_pct],
             history: history,
+            position_usd: position_usd,
             message: message.strip
           }
         end
 
         def create_spread_alert(symbol, high_rate, low_rate, spread)
           spread_apr = annualize_spread(spread)
+
+          # Get current price and calculate position
+          position_usd = 10_000
+          price = get_current_price(symbol)
+          position_tokens = price && price > 0 ? (position_usd / price).round(4) : 0
+
+          # Calculate expected daily profit
+          spread_per_period = spread.to_f
+          periods_per_day = 3  # 8h periods
+          daily_profit_pct = spread_per_period * periods_per_day * 100
+          daily_profit_usd = (position_usd * daily_profit_pct / 100).round(2)
 
           message = <<~MSG
             🔥 FUNDING SPREAD | #{symbol} | #{format_rate(spread)}
@@ -204,10 +362,19 @@ module ArbitrageBot
                #{low_rate[:venue]}: #{format_rate(low_rate[:rate])}/8h (LOW)
                Spread: #{format_rate(spread)}/8h (#{spread_apr}% APR)
 
-            💡 СТРАТЕГИЯ:
-               LONG #{low_rate[:venue]} Perp + SHORT #{high_rate[:venue]} Perp
+            💰 ПОЗИЦИЯ ($#{format_number(position_usd)}):
+            • #{format_tokens(position_tokens)} #{symbol} @ $#{format_price(price)}
+            • LONG на #{low_rate[:venue]} + SHORT на #{high_rate[:venue]}
 
-            ⚠️ КЛАСС: Risk-premium + #{high_rate[:venue_type] == 'dex_perp' ? 'Smart contract risk' : 'Counterparty risk'}
+            💹 ОЖИДАЕМАЯ ПРИБЫЛЬ:
+            • ~#{daily_profit_pct.round(3)}%/день ($#{daily_profit_usd})
+            • ~#{spread_apr}% APR
+
+            📝 ИНСТРУКЦИЯ:
+            1. Открыть LONG #{format_tokens(position_tokens)} #{symbol} на #{low_rate[:venue]}
+            2. Открыть SHORT #{format_tokens(position_tokens)} #{symbol} на #{high_rate[:venue]}
+            3. Собирать funding spread каждые 8 часов
+            4. Выход при spread < 0.01%
           MSG
 
           {
@@ -217,6 +384,7 @@ module ArbitrageBot
             low_venue: low_rate[:venue],
             spread: spread,
             spread_apr: spread_apr,
+            position_usd: position_usd,
             message: message.strip
           }
         end
@@ -314,14 +482,100 @@ module ArbitrageBot
         def format_history_section(history)
           return "" unless history && history[:count] > 0
 
-          lines = ["📈 ИСТОРИЯ (#{history[:days]}д):"]
-          lines << "   Средний: #{format_rate(history[:avg_rate])}"
+          lines = ["📈 HISTORY (#{history[:days]}d):"]
+          lines << "   Average: #{format_rate(history[:avg_rate])}"
 
           if history[:consecutive_positive] > 0
-            lines << "   Подряд положительный: #{history[:consecutive_positive]} периодов"
+            lines << "   Consecutive positive: #{history[:consecutive_positive]} periods"
           end
 
-          lines.join("\n") + "\n"
+          lines.join("\n") + "\n\n"
+        end
+
+        def get_current_price(symbol)
+          # Try to get price from Redis cache
+          prices_data = ArbitrageBot.redis.get('prices:latest')
+          return nil unless prices_data
+
+          prices = JSON.parse(prices_data)
+
+          # Try different key formats
+          ['binance_futures', 'bybit_futures', 'okx_futures'].each do |exchange|
+            key = "#{exchange}:#{symbol}"
+            if prices[key] && prices[key]['last']
+              return prices[key]['last'].to_f
+            end
+          end
+
+          nil
+        rescue StandardError => e
+          @logger.debug("[FundingAlerter] get_current_price error: #{e.message}")
+          nil
+        end
+
+        def get_liquidity(symbol, venue)
+          # Get orderbook depth from cache
+          key = "orderbook:#{venue}:#{symbol}"
+          data = ArbitrageBot.redis.get(key)
+          return nil unless data
+
+          JSON.parse(data, symbolize_names: true)
+        rescue StandardError
+          nil
+        end
+
+        def format_liquidity_section(liquidity, position_usd)
+          return "" unless liquidity
+
+          bids_usd = liquidity[:bids_usd].to_f
+          asks_usd = liquidity[:asks_usd].to_f
+          min_liq = [bids_usd, asks_usd].min
+          ratio = position_usd > 0 ? ((min_liq / position_usd) * 100).round(0) : 0
+
+          <<~LIQ
+            💧 ЛИКВИДНОСТЬ:
+            • Bids: $#{format_number(bids_usd)}
+            • Asks: $#{format_number(asks_usd)}
+            • Позиция vs ликвидность: #{ratio}% #{ratio >= 100 ? "✅" : "⚠️"}
+
+          LIQ
+        end
+
+        def format_tokens(tokens)
+          tokens = tokens.to_f
+          if tokens >= 1_000_000
+            "#{(tokens / 1_000_000).round(2)}M"
+          elsif tokens >= 1_000
+            "#{(tokens / 1_000).round(2)}K"
+          elsif tokens >= 1
+            tokens.round(2).to_s
+          else
+            tokens.round(6).to_s
+          end
+        end
+
+        def format_price(price)
+          return '0' unless price
+          price = price.to_f
+          if price < 0.0001
+            sprintf('%.8f', price)
+          elsif price < 1
+            sprintf('%.4f', price)
+          else
+            sprintf('%.2f', price)
+          end
+        end
+
+        def format_number(num)
+          return '0' unless num
+          num = num.to_f
+          if num >= 1_000_000
+            "#{(num / 1_000_000).round(1)}M"
+          elsif num >= 1_000
+            "#{(num / 1_000).round(1)}K"
+          else
+            num.round(0).to_s
+          end
         end
 
         def on_cooldown?(symbol)

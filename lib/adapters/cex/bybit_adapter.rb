@@ -59,8 +59,9 @@ module ArbitrageBot
           { coin: coin['coin'], networks: networks }
         end
 
-        def ticker(symbol)
-          data = get("#{BASE_URL}/v5/market/tickers?category=linear&symbol=#{symbol}")
+        def ticker(symbol, market_type: :futures)
+          category = market_type == :spot ? 'spot' : 'linear'
+          data = get("#{BASE_URL}/v5/market/tickers?category=#{category}&symbol=#{symbol}")
 
           t = data['result']['list'].first
           {
@@ -72,8 +73,9 @@ module ArbitrageBot
           }
         end
 
-        def tickers(symbols = nil)
-          data = get("#{BASE_URL}/v5/market/tickers?category=linear")
+        def tickers(symbols = nil, market_type: :futures)
+          category = market_type == :spot ? 'spot' : 'linear'
+          data = get("#{BASE_URL}/v5/market/tickers?category=#{category}")
 
           result = {}
           data['result']['list'].each do |t|
@@ -88,8 +90,9 @@ module ArbitrageBot
           result
         end
 
-        def orderbook(symbol, depth: 20)
-          data = get("#{BASE_URL}/v5/market/orderbook?category=linear&symbol=#{symbol}&limit=#{depth}")
+        def orderbook(symbol, depth: 20, market_type: :futures)
+          category = market_type == :spot ? 'spot' : 'linear'
+          data = get("#{BASE_URL}/v5/market/orderbook?category=#{category}&symbol=#{symbol}&limit=#{depth}")
 
           {
             bids: data['result']['b'].map { |p, q| [BigDecimal(p), BigDecimal(q)] },

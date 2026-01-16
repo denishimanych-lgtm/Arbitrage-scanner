@@ -56,7 +56,12 @@ module ArbitrageBot
           slip: 'sl',
           latency: 'lt',
           ratio: 'rt',
-          bidask: 'ba'
+          bidask: 'ba',
+          # Position tracking
+          enter_pos: 'ep',
+          close_pos: 'cp',
+          positions: 'po',
+          posclose: 'pc'
         }.freeze
 
         # Reverse mappings for decoding

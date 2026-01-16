@@ -51,7 +51,7 @@ module ArbitrageBot
         # @param depth [Integer] number of levels
         # @return [Hash] orderbook data
         # { bids: [[price, qty], ...], asks: [[price, qty], ...], timestamp: }
-        def orderbook(symbol, depth: 20)
+        def orderbook(symbol, depth: 20, market_type: nil)
           raise NotImplementedError
         end
 

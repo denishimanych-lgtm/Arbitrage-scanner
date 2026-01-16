@@ -58,7 +58,7 @@ module ArbitrageBot
           { coin: asset, networks: networks }
         end
 
-        def ticker(symbol)
+        def ticker(symbol, market_type: :futures)
           data = get("#{BASE_URL}/api/v5/market/ticker?instId=#{symbol}")
 
           t = data['data'].first
@@ -71,12 +71,15 @@ module ArbitrageBot
           }
         end
 
-        def tickers(symbols = nil)
-          data = get("#{BASE_URL}/api/v5/market/tickers?instType=SWAP")
+        def tickers(symbols = nil, market_type: :futures)
+          inst_type = market_type == :spot ? 'SPOT' : 'SWAP'
+          data = get("#{BASE_URL}/api/v5/market/tickers?instType=#{inst_type}")
 
           result = {}
           data['data'].each do |t|
             next if symbols && !symbols.include?(t['instId'])
+            # Skip entries with empty or missing price data
+            next if t['bidPx'].to_s.empty? || t['askPx'].to_s.empty? || t['last'].to_s.empty?
             result[t['instId']] = {
               bid: BigDecimal(t['bidPx']),
               ask: BigDecimal(t['askPx']),
@@ -87,8 +90,9 @@ module ArbitrageBot
           result
         end
 
-        def orderbook(symbol, depth: 20)
+        def orderbook(symbol, depth: 20, market_type: :futures)
           # OKX limit: 1, 5, 20, 400
+          depth = depth.to_i
           limit = depth <= 5 ? 5 : 20
           data = get("#{BASE_URL}/api/v5/market/books?instId=#{symbol}&sz=#{limit}")
 

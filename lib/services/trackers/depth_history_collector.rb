@@ -15,7 +15,7 @@ module ArbitrageBot
         )
 
         def initialize(redis = nil)
-          @redis = redis || ArbitrageBot.redis
+          # Don't store @redis - always use thread-local ArbitrageBot.redis
           @depth_calc = Calculators::DepthCalculator.new
         end
 
@@ -40,7 +40,7 @@ module ArbitrageBot
         # @return [DepthStats, nil]
         def stats(pair_id, venue_id, side)
           key = depth_key(pair_id, venue_id, side)
-          values = @redis.lrange(key, 0, -1).map(&:to_f)
+          values = ArbitrageBot.redis.lrange(key, 0, -1).map(&:to_f)
 
           return nil if values.empty?
 
@@ -94,7 +94,7 @@ module ArbitrageBot
         # Clear history for a pair/venue
         def clear(pair_id, venue_id)
           %i[bids asks].each do |side|
-            @redis.del(depth_key(pair_id, venue_id, side))
+            ArbitrageBot.redis.del(depth_key(pair_id, venue_id, side))
           end
         end
 
@@ -103,9 +103,9 @@ module ArbitrageBot
         def store_sample(pair_id, venue_id, side, value)
           key = depth_key(pair_id, venue_id, side)
 
-          @redis.lpush(key, value)
-          @redis.ltrim(key, 0, MAX_SAMPLES - 1)
-          @redis.expire(key, HISTORY_TTL)
+          ArbitrageBot.redis.lpush(key, value)
+          ArbitrageBot.redis.ltrim(key, 0, MAX_SAMPLES - 1)
+          ArbitrageBot.redis.expire(key, HISTORY_TTL)
         end
 
         def depth_key(pair_id, venue_id, side)

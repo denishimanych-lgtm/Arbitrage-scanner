@@ -8,6 +8,32 @@ module ArbitrageBot
         API_URL = 'https://arbitrum-api.gmxinfra.io'
         SUBGRAPH_URL = 'https://subgraph.satsuma-prod.com/3b2ced13c8d9/gmx/synthetics-arbitrum-stats/api'
 
+        # Token decimals for price calculation
+        # GMX stores prices as: price * 10^(30 - tokenDecimals)
+        TOKEN_DECIMALS = {
+          'BTC' => 8,
+          'ETH' => 18,
+          'WETH' => 18,
+          'SOL' => 9,
+          'LINK' => 18,
+          'UNI' => 18,
+          'ARB' => 18,
+          'AVAX' => 18,
+          'DOGE' => 8,
+          'LTC' => 8,
+          'XRP' => 6,
+          'NEAR' => 24,
+          'ATOM' => 6,
+          'AAVE' => 18,
+          'OP' => 18,
+          'GMX' => 18,
+          'PEPE' => 18,
+          'WIF' => 6,
+          'ORDI' => 18
+        }.freeze
+
+        DEFAULT_DECIMALS = 18
+
         def dex_id
           'gmx'
         end
@@ -31,10 +57,11 @@ module ArbitrageBot
           ticker_data = data.find { |t| t['tokenSymbol'] == symbol }
           return nil unless ticker_data
 
+          divisor = price_divisor(symbol)
           {
             symbol: symbol,
-            bid: BigDecimal(ticker_data['minPrice'].to_s) / 1e30,
-            ask: BigDecimal(ticker_data['maxPrice'].to_s) / 1e30,
+            bid: BigDecimal(ticker_data['minPrice'].to_s) / divisor,
+            ask: BigDecimal(ticker_data['maxPrice'].to_s) / divisor,
             timestamp: Time.now.to_i * 1000
           }
         end
@@ -48,13 +75,21 @@ module ArbitrageBot
             next if symbols && !symbols.include?(sym)
             next if result[sym] # Skip duplicates
 
+            divisor = price_divisor(sym)
             result[sym] = {
-              bid: BigDecimal(t['minPrice'].to_s) / 1e30,
-              ask: BigDecimal(t['maxPrice'].to_s) / 1e30,
+              bid: BigDecimal(t['minPrice'].to_s) / divisor,
+              ask: BigDecimal(t['maxPrice'].to_s) / divisor,
               timestamp: Time.now.to_i * 1000
             }
           end
           result
+        end
+
+        # Calculate price divisor based on token decimals
+        # GMX formula: actualPrice = rawPrice / 10^(30 - tokenDecimals)
+        def price_divisor(symbol)
+          decimals = TOKEN_DECIMALS[symbol] || DEFAULT_DECIMALS
+          BigDecimal(10)**(30 - decimals)
         end
 
         def orderbook(symbol, depth: 20)

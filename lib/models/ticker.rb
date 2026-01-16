@@ -111,14 +111,15 @@ module ArbitrageBot
         end
 
         (@venues[:dex_spot] || []).each do |v|
-          result << v.merge(type: :dex_spot, venue_id: "#{v[:dex]}_#{v[:chain]}")
+          result << v.merge(type: :dex_spot, venue_id: "#{v[:dex]}_#{v[:chain]}", symbol: @symbol)
         end
 
         (@venues[:perp_dex] || []).each do |v|
           result << v.merge(type: :perp_dex, venue_id: "#{v[:dex]}_perp")
         end
 
-        result
+        # Deduplicate by venue_id to prevent same-exchange pairs
+        result.uniq { |v| v[:venue_id] }
       end
 
       # Check if ticker has any shortable venue

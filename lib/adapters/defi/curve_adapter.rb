@@ -112,11 +112,7 @@ module ArbitrageBot
           def fetch_from_curve_api
             uri = URI("#{CURVE_API}/getPools/ethereum/main")
 
-            http = Net::HTTP.new(uri.host, uri.port)
-            http.use_ssl = true
-            http.open_timeout = 10
-            http.read_timeout = 10
-
+            http = Support::SslConfig.create_http(uri, timeout: 10)
             response = http.get(uri.request_uri)
             return nil unless response.code == '200'
 
@@ -136,11 +132,7 @@ module ArbitrageBot
           def fetch_from_defillama
             uri = URI(DEFILLAMA_API)
 
-            http = Net::HTTP.new(uri.host, uri.port)
-            http.use_ssl = true
-            http.open_timeout = 10
-            http.read_timeout = 10
-
+            http = Support::SslConfig.create_http(uri, timeout: 10)
             response = http.get(uri.request_uri)
             return nil unless response.code == '200'
 

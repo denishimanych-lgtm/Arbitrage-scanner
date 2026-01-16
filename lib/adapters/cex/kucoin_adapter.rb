@@ -60,49 +60,82 @@ module ArbitrageBot
           { coin: coin['currency'], networks: networks }
         end
 
-        def ticker(symbol)
-          data = get("#{FUTURES_URL}/api/v1/ticker?symbol=#{symbol}")
-
-          t = data['data']
-          {
-            symbol: t['symbol'],
-            bid: BigDecimal(t['bestBidPrice'].to_s),
-            ask: BigDecimal(t['bestAskPrice'].to_s),
-            last: BigDecimal(t['price'].to_s),
-            timestamp: t['ts'].to_i
-          }
+        def ticker(symbol, market_type: :futures)
+          if market_type == :spot
+            # Convert futures symbol to spot (e.g., BTCUSDTM -> BTC-USDT)
+            spot_symbol = symbol.gsub(/USDTM$/, '-USDT')
+            data = get("#{SPOT_URL}/api/v1/market/orderbook/level1?symbol=#{spot_symbol}")
+            t = data['data']
+            {
+              symbol: spot_symbol,
+              bid: BigDecimal(t['bestBid'].to_s),
+              ask: BigDecimal(t['bestAsk'].to_s),
+              last: BigDecimal(t['price'].to_s),
+              timestamp: t['time'].to_i
+            }
+          else
+            data = get("#{FUTURES_URL}/api/v1/ticker?symbol=#{symbol}")
+            t = data['data']
+            {
+              symbol: t['symbol'],
+              bid: BigDecimal(t['bestBidPrice'].to_s),
+              ask: BigDecimal(t['bestAskPrice'].to_s),
+              last: BigDecimal(t['price'].to_s),
+              timestamp: t['ts'].to_i
+            }
+          end
         end
 
-        def tickers(symbols = nil)
-          # KuCoin doesn't have batch futures ticker, fetch individually or use spot tickers
+        def tickers(symbols = nil, market_type: :futures)
           data = get("#{SPOT_URL}/api/v1/market/allTickers")
-
           result = {}
+
           data['data']['ticker'].each do |t|
             next unless t['symbol'].end_with?('-USDT')
-            # Skip entries with missing price data
             next if t['buy'].to_s.empty? || t['sell'].to_s.empty? || t['last'].to_s.empty?
 
-            futures_symbol = "#{t['symbol'].gsub('-USDT', '')}USDTM"
-            next if symbols && !symbols.include?(futures_symbol)
-            result[futures_symbol] = {
-              bid: BigDecimal(t['buy'].to_s),
-              ask: BigDecimal(t['sell'].to_s),
-              last: BigDecimal(t['last'].to_s),
-              timestamp: data['data']['time'].to_i
-            }
+            if market_type == :spot
+              # Return spot symbols with spot format
+              spot_symbol = t['symbol']
+              next if symbols && !symbols.include?(spot_symbol)
+              result[spot_symbol] = {
+                bid: BigDecimal(t['buy'].to_s),
+                ask: BigDecimal(t['sell'].to_s),
+                last: BigDecimal(t['last'].to_s),
+                timestamp: data['data']['time'].to_i
+              }
+            else
+              # Return with futures symbol format
+              futures_symbol = "#{t['symbol'].gsub('-USDT', '')}USDTM"
+              next if symbols && !symbols.include?(futures_symbol)
+              result[futures_symbol] = {
+                bid: BigDecimal(t['buy'].to_s),
+                ask: BigDecimal(t['sell'].to_s),
+                last: BigDecimal(t['last'].to_s),
+                timestamp: data['data']['time'].to_i
+              }
+            end
           end
           result
         end
 
-        def orderbook(symbol, depth: 20)
-          data = get("#{FUTURES_URL}/api/v1/level2/depth#{depth}?symbol=#{symbol}")
-
-          {
-            bids: data['data']['bids'].map { |p, q| [BigDecimal(p.to_s), BigDecimal(q.to_s)] },
-            asks: data['data']['asks'].map { |p, q| [BigDecimal(p.to_s), BigDecimal(q.to_s)] },
-            timestamp: data['data']['ts'].to_i
-          }
+        def orderbook(symbol, depth: 20, market_type: :futures)
+          if market_type == :spot
+            spot_symbol = symbol.gsub(/USDTM$/, '-USDT')
+            data = get("#{SPOT_URL}/api/v1/market/orderbook/level2_#{depth}?symbol=#{spot_symbol}")
+            {
+              bids: data['data']['bids'].map { |p, q| [BigDecimal(p.to_s), BigDecimal(q.to_s)] },
+              asks: data['data']['asks'].map { |p, q| [BigDecimal(p.to_s), BigDecimal(q.to_s)] },
+              timestamp: data['data']['time'].to_i
+            }
+          else
+            data = get("#{FUTURES_URL}/api/v1/level2/depth#{depth}?symbol=#{symbol}")
+            {
+              bids: data['data']['bids'].map { |p, q| [BigDecimal(p.to_s), BigDecimal(q.to_s)] },
+              asks: data['data']['asks'].map { |p, q| [BigDecimal(p.to_s), BigDecimal(q.to_s)] },
+              timestamp: data['data']['ts'].to_i
+            }
+          end
         end
 
         def funding_rate(symbol)

@@ -107,7 +107,20 @@ module ArbitrageBot
           end
 
           def show_settings(submenu = nil)
-            push_current_state
+            # Determine target state based on submenu
+            target_state = case submenu
+                           when 'sp' then :settings_spread
+                           when 'cd' then :settings_cooldown
+                           when 'sg' then :settings_signals
+                           when 'lq' then :settings_liquidity
+                           when 'vl' then :settings_volume
+                           when 'ps' then :settings_position
+                           when 'sf' then :settings_safety
+                           else :settings
+                           end
+
+            # Only push if navigating to a different state (not refreshing same menu)
+            push_current_state unless @state.current_state == target_state
 
             keyboard = Keyboards::SettingsKeyboard.new(user_id: @chat_id)
             settings = SettingsLoader.new.load
@@ -130,6 +143,7 @@ module ArbitrageBot
               kb = keyboard.build_liquidity_menu
               text = Keyboards::SettingsKeyboard.build_liquidity_text(
                 settings[:min_liquidity_usd],
+                settings[:min_dex_liquidity_usd] || 1000,
                 settings[:min_exit_liquidity_usd]
               )
             when 'vl'
@@ -167,7 +181,16 @@ module ArbitrageBot
           end
 
           def show_blacklist(submenu = nil)
-            push_current_state
+            # Determine target state based on submenu
+            target_state = case submenu
+                           when 'sy' then :blacklist_symbols
+                           when 'ex' then :blacklist_exchanges
+                           when 'pr' then :blacklist_pairs
+                           else :blacklist
+                           end
+
+            # Only push if navigating to a different state (not refreshing same menu)
+            push_current_state unless @state.current_state == target_state
 
             keyboard = Keyboards::BlacklistKeyboard.new(user_id: @chat_id)
             bl = Alerts::Blacklist.new
@@ -250,7 +273,7 @@ module ArbitrageBot
             @state.set_state(:zscores)
 
             tracker = ZScore::ZScoreTracker.new
-            zscores = tracker.all_zscores
+            zscores = tracker.calculate_all
             alerter = ZScore::ZScoreAlerter.new
             text = alerter.format_zscores_message(zscores)
 
@@ -307,7 +330,9 @@ module ArbitrageBot
             when :cooldown
               handle_cooldown_setting
             when :minliq
-              handle_setting_value(:min_liquidity_usd, @parsed[:params][0].to_i, 'Min Liquidity', 'lq')
+              handle_setting_value(:min_liquidity_usd, @parsed[:params][0].to_i, 'Min CEX Liquidity', 'lq')
+            when :dexliq
+              handle_setting_value(:min_dex_liquidity_usd, @parsed[:params][0].to_i, 'Min DEX Pool', 'lq')
             when :exitliq
               handle_setting_value(:min_exit_liquidity_usd, @parsed[:params][0].to_i, 'Exit Liquidity', 'lq')
             when :voldex
@@ -401,14 +426,32 @@ module ArbitrageBot
                   when :auto then :enable_auto_signals
                   when :manual then :enable_manual_signals
                   when :lagging then :enable_lagging_signals
+                  when :funding then :enable_funding_alerts
+                  when :zscore then :enable_zscore_alerts
+                  when :stablecoin then :enable_stablecoin_alerts
                   else
                     answer('Unknown toggle')
                     return
                   end
 
-            new_value = !settings[key]
+            # Handle new settings that might not exist yet (default to true)
+            current_value = settings[key]
+            current_value = true if current_value.nil?
+            new_value = !current_value
+
             settings_loader.set(key, new_value)
-            answer("#{@parsed[:target].capitalize} signals #{new_value ? 'enabled' : 'disabled'}")
+
+            type_name = case @parsed[:target]
+                        when :auto then 'Hedged'
+                        when :manual then 'Manual'
+                        when :lagging then 'Lagging'
+                        when :funding then 'Funding Rate'
+                        when :zscore then 'Z-Score'
+                        when :stablecoin then 'Stablecoin'
+                        else @parsed[:target].to_s.capitalize
+                        end
+
+            answer("#{type_name} alerts #{new_value ? 'enabled' : 'disabled'}")
 
             # Refresh signals menu
             show_settings('sg')
@@ -520,9 +563,106 @@ module ArbitrageBot
               handle_confirm
             when :cancel
               go_back
+            when :enter_pos
+              handle_enter_position
+            when :close_pos
+              handle_close_position
             else
               answer("Unknown action: #{@parsed[:target]}")
             end
+          end
+
+          # Handle "Вступил в позицию" button press
+          def handle_enter_position
+            short_signal_id = @parsed[:params][0]
+            return answer('Signal ID missing') unless short_signal_id
+
+            # Find the signal
+            signal = find_signal_by_short_id(short_signal_id)
+            unless signal
+              return answer('Сигнал не найден')
+            end
+
+            # Start position tracking
+            tracker = Trackers::PositionTracker.new
+            result = tracker.start_tracking(
+              signal_id: signal[:id],
+              user_id: @chat_id,
+              symbol: signal[:symbol],
+              pair_id: signal.dig(:details, 'pair_id') || extract_pair_id(signal),
+              entry_spread_pct: signal.dig(:details, 'spread_pct') || signal.dig(:details, 'net_spread_pct') || 0,
+              telegram_msg_id: @message_id
+            )
+
+            if result
+              answer('Позиция отслеживается!')
+              # Remove keyboard from the alert message
+              remove_keyboard_from_message
+            else
+              answer('Ошибка при создании отслеживания')
+            end
+          end
+
+          # Handle "Закрыл позицию" button press
+          def handle_close_position
+            short_position_id = @parsed[:params][0]
+            return answer('Position ID missing') unless short_position_id
+
+            tracker = Trackers::PositionTracker.new
+
+            # Find position by short ID
+            sql = <<~SQL
+              SELECT * FROM position_tracking
+              WHERE id::text LIKE $1 || '%'
+                AND user_id = $2
+              LIMIT 1
+            SQL
+
+            position = Analytics::DatabaseConnection.query_one(sql, [short_position_id, @chat_id])
+
+            unless position
+              return answer('Позиция не найдена')
+            end
+
+            tracker.mark_closed(position[:id])
+            answer('Позиция закрыта!')
+
+            # Update message to show position is closed
+            text = "Позиция #{position[:symbol]} закрыта\n\n" \
+                   "Вход: #{position[:entry_spread_pct].to_f.round(2)}%\n" \
+                   "Выход: #{position[:current_spread_pct].to_f.round(2)}%"
+
+            edit_message(text, { inline_keyboard: [] })
+          end
+
+          # Find signal by short ID (first 8 chars)
+          def find_signal_by_short_id(short_id)
+            sql = <<~SQL
+              SELECT * FROM signals
+              WHERE id::text LIKE $1 || '%'
+              ORDER BY created_at DESC
+              LIMIT 1
+            SQL
+
+            Analytics::DatabaseConnection.query_one(sql, [short_id])
+          rescue StandardError => e
+            @logger.error("[Callback] find_signal_by_short_id error: #{e.message}")
+            nil
+          end
+
+          # Extract pair_id from signal details
+          def extract_pair_id(signal)
+            details = signal[:details] || {}
+            buy_venue = details['buy_venue'] || 'unknown'
+            sell_venue = details['sell_venue'] || 'unknown'
+            "#{buy_venue.downcase.gsub(' ', '_')}:#{sell_venue.downcase.gsub(' ', '_')}"
+          end
+
+          # Remove inline keyboard from current message
+          def remove_keyboard_from_message
+            @bot.edit_message_reply_markup(@chat_id, @message_id, reply_markup: { inline_keyboard: [] })
+          rescue StandardError => e
+            @logger.debug("[Callback] remove_keyboard error: #{e.message}")
           end
 
           def handle_stats_period

@@ -366,6 +366,8 @@ module ArbitrageBot
             cmd_zscores(chat_id)
           when 'stables'
             cmd_stables(chat_id)
+          when 'convergence'
+            cmd_convergence(chat_id, args)
           else
             send_message(chat_id, "Unknown command: /#{command}\nUse /help for available commands.")
           end
@@ -408,6 +410,9 @@ module ArbitrageBot
 
             Stablecoins:
             /stables - Current stablecoin prices
+
+            Analytics:
+            /convergence [days] - Spread convergence stats
           MSG
         end
 
@@ -583,7 +588,7 @@ module ArbitrageBot
 
             #{lines.join("\n")}
 
-            Last discovery: #{ArbitrageBot.redis.get('discovery:last_run') || 'Never'}
+            Last discovery: #{format_discovery_time}
           MSG
 
           send_message(chat_id, msg)
@@ -746,6 +751,19 @@ module ArbitrageBot
           send_message(chat_id, "Error loading stablecoin prices: #{e.message}")
         end
 
+        def cmd_convergence(chat_id, args)
+          # Parse days argument (default: 30)
+          days = args.first&.to_i
+          days = 30 if days.nil? || days <= 0 || days > 365
+
+          tracker = Analytics::SpreadConvergenceTracker.new
+          msg = tracker.format_stats_message(days: days)
+          send_message(chat_id, msg)
+        rescue StandardError => e
+          @logger.error("[TelegramBot] Convergence error: #{e.message}")
+          send_message(chat_id, "Error loading convergence stats: #{e.message}")
+        end
+
         # === Helpers ===
 
         def check_callback_rate_limit(chat_id)
@@ -831,6 +849,17 @@ module ArbitrageBot
           stats.transform_keys(&:to_sym)
         rescue StandardError
           {}
+        end
+
+        def format_discovery_time
+          ts = ArbitrageBot.redis.get('tickers:last_update')
+          return 'Never' unless ts
+
+          time = Time.at(ts.to_i)
+          ago = Time.now - time
+          "#{time.strftime('%Y-%m-%d %H:%M')} (#{format_duration(ago.to_i)} ago)"
+        rescue StandardError
+          'Unknown'
         end
 
         def format_duration(seconds)

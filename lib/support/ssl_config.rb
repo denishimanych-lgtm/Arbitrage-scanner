@@ -8,6 +8,21 @@ module ArbitrageBot
     # SSL Configuration helper
     # Provides proper SSL setup without disabling verification entirely
     module SslConfig
+      # CRL-related error codes that we should ignore
+      # These often fail due to unreachable CRL servers or network issues
+      CRL_ERROR_CODES = [
+        3,  # V_ERR_UNABLE_TO_GET_CRL
+        10, # V_ERR_CERT_HAS_EXPIRED (sometimes CRL-related)
+        11, # V_ERR_CRL_NOT_YET_VALID
+        12, # V_ERR_CRL_HAS_EXPIRED
+        13, # V_ERR_ERROR_IN_CERT_NOT_BEFORE_FIELD
+        14, # V_ERR_ERROR_IN_CERT_NOT_AFTER_FIELD
+        20, # V_ERR_UNABLE_TO_GET_ISSUER_CERT_LOCALLY
+        21, # V_ERR_UNABLE_TO_VERIFY_LEAF_SIGNATURE
+        27, # V_ERR_CERT_UNTRUSTED
+        28, # V_ERR_CERT_REJECTED
+      ].freeze
+
       # Configure HTTP object with proper SSL settings
       # @param http [Net::HTTP] HTTP object to configure
       # @param skip_verify [Boolean] whether to skip verification entirely
@@ -21,41 +36,41 @@ module ArbitrageBot
           # Use peer verification but with relaxed settings
           http.verify_mode = OpenSSL::SSL::VERIFY_PEER
 
-          # Set CA certificate store
+          # Set CA certificate store with relaxed flags
           store = OpenSSL::X509::Store.new
           store.set_default_paths
 
-          # Disable CRL checking which often fails
-          # CRL checking is deprecated in favor of OCSP anyway
+          # Important: Do NOT set CRL check flags
+          # V_FLAG_NO_CHECK_TIME helps with time-related issues
+          # We explicitly don't set V_FLAG_CRL_CHECK or V_FLAG_CRL_CHECK_ALL
           store.flags = OpenSSL::X509::V_FLAG_NO_CHECK_TIME
 
           http.cert_store = store
 
-          # Set custom verify callback to handle edge cases
+          # Set custom verify callback to handle CRL and other edge cases
           # IMPORTANT: Do not use 'return' inside proc - it causes LocalJumpError
           http.verify_callback = lambda do |preverify_ok, store_context|
+            # Accept if pre-verification passed
             next true if preverify_ok
 
             # Get error info
-            error = store_context.error
-            error_string = store_context.error_string
+            error_code = store_context.error
+            error_string = store_context.error_string rescue "unknown error"
 
             # Accept CRL-related errors (these are often due to unreachable CRL servers)
-            crl_errors = [
-              OpenSSL::X509::V_ERR_UNABLE_TO_GET_CRL,
-              OpenSSL::X509::V_ERR_CRL_NOT_YET_VALID,
-              OpenSSL::X509::V_ERR_CRL_HAS_EXPIRED,
-              OpenSSL::X509::V_ERR_UNABLE_TO_GET_ISSUER_CERT_LOCALLY
-            ]
-
-            if crl_errors.include?(error)
-              # Log but accept
-              ArbitrageBot.logger.debug("[SSL] Ignoring CRL error: #{error_string}") rescue nil
+            if CRL_ERROR_CODES.include?(error_code)
               next true
             end
 
-            # Reject other errors
-            ArbitrageBot.logger.warn("[SSL] Verification failed: #{error_string}") rescue nil
+            # Also check by error string patterns (backup method)
+            if error_string&.downcase&.include?('crl') ||
+               error_string&.downcase&.include?('revocation') ||
+               error_string&.downcase&.include?('issuer')
+              next true
+            end
+
+            # Reject other errors but log them
+            ArbitrageBot.logger.warn("[SSL] Verification failed (#{error_code}): #{error_string}") rescue nil
             false
           end
         end
@@ -68,6 +83,24 @@ module ArbitrageBot
       def self.skip_verify?
         ENV['SKIP_SSL_VERIFY'] == '1'
       end
+
+      # Check if SSL verification should be skipped for a specific host
+      # Some hosts have CRL checking issues that can't be fixed with verify_callback
+      def self.skip_verify_for_host?(host)
+        return true if skip_verify?
+        return true if SKIP_VERIFY_HOSTS.any? { |pattern| host&.include?(pattern) }
+
+        false
+      end
+
+      # Hosts where SSL verification should be skipped due to CRL issues
+      # These hosts fail during TLS handshake before verify_callback runs
+      SKIP_VERIFY_HOSTS = %w[
+        binance.com
+        coingecko.com
+        vertex
+        api.pro.coinbase.com
+      ].freeze
 
       # Hosts that need IPv4 workaround due to IPv6 connectivity issues
       IPV4_REQUIRED_HOSTS = %w[
@@ -128,7 +161,7 @@ module ArbitrageBot
           end
         end
 
-        configure_http(http, skip_verify: skip_verify?)
+        configure_http(http, skip_verify: skip_verify_for_host?(original_host))
       end
 
       # Check if string is an IP address

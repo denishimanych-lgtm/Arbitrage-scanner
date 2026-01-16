@@ -60,19 +60,23 @@ module ArbitrageBot
           { coin: coin['coin'], networks: networks }
         end
 
-        def ticker(symbol)
-          data = get("#{FUTURES_BASE_URL}/fapi/v1/ticker/bookTicker?symbol=#{symbol}")
+        def ticker(symbol, market_type: :futures)
+          base_url = market_type == :spot ? SPOT_BASE_URL : FUTURES_BASE_URL
+          endpoint = market_type == :spot ? '/api/v3/ticker/bookTicker' : '/fapi/v1/ticker/bookTicker'
+          data = get("#{base_url}#{endpoint}?symbol=#{symbol}")
 
           {
             symbol: data['symbol'],
             bid: BigDecimal(data['bidPrice']),
             ask: BigDecimal(data['askPrice']),
-            timestamp: data['time']
+            timestamp: data['time'] || (Time.now.to_f * 1000).to_i
           }
         end
 
-        def tickers(symbols = nil)
-          data = get("#{FUTURES_BASE_URL}/fapi/v1/ticker/bookTicker")
+        def tickers(symbols = nil, market_type: :futures)
+          base_url = market_type == :spot ? SPOT_BASE_URL : FUTURES_BASE_URL
+          endpoint = market_type == :spot ? '/api/v3/ticker/bookTicker' : '/fapi/v1/ticker/bookTicker'
+          data = get("#{base_url}#{endpoint}")
 
           result = {}
           data.each do |t|
@@ -80,14 +84,16 @@ module ArbitrageBot
             result[t['symbol']] = {
               bid: BigDecimal(t['bidPrice']),
               ask: BigDecimal(t['askPrice']),
-              timestamp: t['time']
+              timestamp: t['time'] || (Time.now.to_f * 1000).to_i
             }
           end
           result
         end
 
-        def orderbook(symbol, depth: 20)
-          data = get("#{FUTURES_BASE_URL}/fapi/v1/depth?symbol=#{symbol}&limit=#{depth}")
+        def orderbook(symbol, depth: 20, market_type: :futures)
+          base_url = market_type == :spot ? SPOT_BASE_URL : FUTURES_BASE_URL
+          endpoint = market_type == :spot ? '/api/v3/depth' : '/fapi/v1/depth'
+          data = get("#{base_url}#{endpoint}?symbol=#{symbol}&limit=#{depth}")
 
           {
             bids: data['bids'].map { |p, q| [BigDecimal(p), BigDecimal(q)] },

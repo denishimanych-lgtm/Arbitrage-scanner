@@ -70,7 +70,16 @@ module ArbitrageBot
         lib/services/analytics/postgres_logger
         lib/services/analytics/signal_repository
         lib/services/analytics/trade_tracker
+        lib/services/analytics/spread_convergence_tracker
+        lib/services/analytics/spread_baseline_collector
+        lib/services/analytics/spread_history_tracker
+        lib/services/analytics/adaptive_tracking_scheduler
+        lib/services/analytics/convergence_snapshot_collector
+        lib/services/analytics/convergence_analyzer
+        lib/services/analytics/pair_statistics_service
+        lib/services/analytics/cross_pair_comparison_service
         lib/services/funding/funding_collector
+        lib/services/funding/funding_flip_detector
         lib/services/funding/funding_alerter
         lib/services/zscore/pairs_config
         lib/services/zscore/ratio_calculator
@@ -90,8 +99,11 @@ module ArbitrageBot
         lib/services/contract_fetcher
         lib/services/ticker_matcher
         lib/jobs/ticker_discovery_job
+        lib/jobs/pair_cleanup_job
+        lib/adapters/aggregator/dexscreener_adapter
         lib/services/price_fetcher/cex_price_fetcher
         lib/services/price_fetcher/dex_price_fetcher
+        lib/services/price_fetcher/dex_bulk_price_fetcher
         lib/services/price_fetcher/perp_dex_price_fetcher
         lib/services/orderbook/cex_orderbook_fetcher
         lib/services/orderbook/dex_depth_fetcher
@@ -102,15 +114,19 @@ module ArbitrageBot
         lib/services/trackers/timing_data
         lib/services/trackers/spread_age_tracker
         lib/services/trackers/depth_history_collector
+        lib/services/trackers/position_tracker
         lib/jobs/price_monitor_job
         lib/jobs/orderbook_analysis_job
         lib/services/settings_loader
         lib/services/safety/liquidity_checker
         lib/services/safety/lagging_exchange_detector
+        lib/services/safety/volatility_buffer
+        lib/services/safety/deposit_withdraw_checker
         lib/services/safety/signal_builder
         lib/services/alerts/alert_formatter
         lib/services/alerts/cooldown_manager
         lib/services/alerts/blacklist
+        lib/services/alerts/signal_grouper
         lib/services/telegram/callback_data
         lib/services/telegram/state/user_state
         lib/services/telegram/state/navigation_stack
@@ -120,6 +136,7 @@ module ArbitrageBot
         lib/services/telegram/keyboards/blacklist_keyboard
         lib/services/telegram/keyboards/spreads_keyboard
         lib/services/telegram/keyboards/status_keyboard
+        lib/services/telegram/keyboards/alert_keyboard
         lib/services/telegram/handlers/callback_handler
         lib/services/telegram/telegram_notifier
         lib/services/telegram/bot
@@ -127,6 +144,8 @@ module ArbitrageBot
         lib/jobs/funding_rate_job
         lib/jobs/zscore_monitor_job
         lib/jobs/stablecoin_monitor_job
+        lib/jobs/convergence_check_job
+        lib/jobs/position_check_job
         lib/orchestrator
       ]
 

@@ -61,17 +61,30 @@ module ArbitrageBot
         # @param symbol [String] stablecoin symbol
         # @return [Hash, nil]
         def fetch_price(symbol)
-          # Try Binance first (more accurate for trading pairs)
-          price = fetch_from_binance(symbol)
-          source = 'binance'
+          price = nil
+          source = nil
 
-          # Fallback to CoinGecko
-          unless price
-            price = fetch_from_coingecko(symbol)
-            source = 'coingecko'
+          # 1. Try internal prices:latest cache first (fastest, most reliable)
+          price = fetch_from_prices_cache(symbol)
+          source = 'cache' if price && price > 0
+
+          # 2. Try Binance API
+          unless price && price > 0
+            price = fetch_from_binance(symbol)
+            source = 'binance' if price && price > 0
           end
 
-          return nil unless price
+          # 3. Fallback to CoinGecko
+          unless price && price > 0
+            price = fetch_from_coingecko(symbol)
+            source = 'coingecko' if price && price > 0
+          end
+
+          # Validate price
+          unless price && price > 0
+            @logger.warn("[DepegMonitor] No valid price for #{symbol}")
+            return nil
+          end
 
           deviation = ((price - 1.0) * 100).round(4)
 
@@ -104,6 +117,42 @@ module ArbitrageBot
 
         private
 
+        # Fetch from internal prices:latest Redis cache
+        def fetch_from_prices_cache(symbol)
+          data = ArbitrageBot.redis.get('prices:latest')
+          return nil unless data
+
+          prices = JSON.parse(data)
+
+          # Try different key formats (spot preferred for stablecoins)
+          possible_keys = [
+            "binance_spot:#{symbol}",
+            "okx_spot:#{symbol}",
+            "bybit_spot:#{symbol}",
+            "gate_spot:#{symbol}",
+            "kucoin_spot:#{symbol}"
+          ]
+
+          possible_keys.each do |key|
+            next unless prices[key]
+
+            price_data = prices[key]
+            # Handle both hash and simple value formats
+            price = if price_data.is_a?(Hash)
+                      price_data['last']&.to_f || price_data['bid']&.to_f
+                    else
+                      price_data.to_f
+                    end
+
+            return price if price && price > 0
+          end
+
+          nil
+        rescue StandardError => e
+          @logger.debug("[DepegMonitor] fetch_from_prices_cache error: #{e.message}")
+          nil
+        end
+
         def fetch_from_binance(symbol)
           # Use USDT pairs for other stables, or BUSD for USDT
           quote = symbol == 'USDT' ? 'BUSD' : 'USDT'
@@ -111,19 +160,16 @@ module ArbitrageBot
 
           uri = URI("https://api.binance.com/api/v3/ticker/price?symbol=#{pair}")
 
-          http = Net::HTTP.new(uri.host, uri.port)
-          http.use_ssl = true
-          http.open_timeout = 5
-          http.read_timeout = 5
-
+          http = Support::SslConfig.create_http(uri, timeout: 5)
           response = http.get(uri.request_uri)
           return nil unless response.code == '200'
 
           data = JSON.parse(response.body)
           price = data['price'].to_f
 
-          # If using BUSD quote, the price is already in USD terms
-          # If using USDT quote, need to consider USDT might be depegged too
+          # Binance sometimes returns 0.0 for delisted or illiquid pairs
+          return nil if price <= 0
+
           price
         rescue StandardError => e
           @logger.debug("[DepegMonitor] Binance error for #{symbol}: #{e.message}")
@@ -136,11 +182,7 @@ module ArbitrageBot
 
           uri = URI("https://api.coingecko.com/api/v3/simple/price?ids=#{coin_id}&vs_currencies=usd")
 
-          http = Net::HTTP.new(uri.host, uri.port)
-          http.use_ssl = true
-          http.open_timeout = 10
-          http.read_timeout = 10
-
+          http = Support::SslConfig.create_http(uri, timeout: 10)
           response = http.get(uri.request_uri)
           return nil unless response.code == '200'
 

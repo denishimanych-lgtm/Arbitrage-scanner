@@ -22,8 +22,14 @@ module ArbitrageBot
         # Skip if less than 2 venues
         return pairs if all_venues.size < 2
 
+        # Deduplicate venues by venue_id
+        unique_venues = all_venues.uniq { |v| v[:venue_id] }
+
         # Generate all combinations
-        all_venues.combination(2).each do |venue1, venue2|
+        unique_venues.combination(2).each do |venue1, venue2|
+          # Skip if same venue_id (shouldn't happen after dedup, but safety check)
+          next if venue1[:venue_id] == venue2[:venue_id]
+
           pair = build_pair(ticker, venue1, venue2)
           pairs << pair if pair
         end

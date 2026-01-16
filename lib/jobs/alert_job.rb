@@ -32,6 +32,9 @@ module ArbitrageBot
         )
 
         @blacklist = Services::Alerts::Blacklist.new
+        @convergence_tracker = Services::Analytics::SpreadConvergenceTracker.new
+        @signal_grouper = Services::Alerts::SignalGrouper.new
+        @spread_history_tracker = Services::Analytics::SpreadHistoryTracker.new
 
         log('AlertJob initialized')
       end
@@ -81,9 +84,10 @@ module ArbitrageBot
           return nil
         end
 
-        # 6. Check minimum spread
-        if validated_signal.spread[:real_pct] < @settings[:min_spread_pct]
-          log("  Spread too low: #{validated_signal.spread[:real_pct]}% < #{@settings[:min_spread_pct]}%")
+        # 6. Check minimum spread (reload from Redis for real-time UI changes)
+        current_min_spread = reload_min_spread_setting
+        if validated_signal.spread[:real_pct] < current_min_spread
+          log("  Spread too low: #{validated_signal.spread[:real_pct]}% < #{current_min_spread}%")
           record_stat(:spread_too_low)
           log_rejected_signal(raw_signal, "spread_too_low:#{validated_signal.spread[:real_pct]}%", validated_signal)
           return nil
@@ -111,7 +115,10 @@ module ArbitrageBot
           # 11. Log spread to PostgreSQL
           log_spread_to_db(validated_signal, raw_signal, db_signal)
 
-          # 12. Set cooldown
+          # 12. Start convergence tracking
+          start_convergence_tracking(validated_signal, raw_signal, db_signal)
+
+          # 13. Set cooldown
           cooldown_duration = validated_signal.signal_type == :lagging ?
             @settings[:lagging_alert_cooldown_seconds] :
             @settings[:alert_cooldown_seconds]
@@ -132,23 +139,202 @@ module ArbitrageBot
         end
       end
 
-      # Process queue continuously
+      # Process queue continuously with signal grouping
       def run_loop
-        log('Starting alert job loop')
+        log('Starting alert job loop (with grouping)')
 
         loop do
           begin
-            # Pop from queue (blocking with timeout)
-            _, data = @redis.brpop(SIGNAL_QUEUE_KEY, timeout: 5)
+            # Collect signals for grouping window (2 seconds)
+            signals = collect_signals_for_grouping(timeout: 2)
 
-            if data
-              perform(data)
+            if signals.any?
+              process_grouped_signals(signals)
             end
           rescue StandardError => e
             @logger.error("Alert job error: #{e.message}")
             @logger.error(e.backtrace.first(5).join("\n"))
             sleep 1
           end
+        end
+      end
+
+      # Collect signals from queue within a time window
+      # @param timeout [Integer] seconds to collect
+      # @return [Array<Hash>] collected raw signals
+      def collect_signals_for_grouping(timeout: 2)
+        signals = []
+        deadline = Time.now + timeout
+
+        loop do
+          remaining = (deadline - Time.now).to_i
+          break if remaining <= 0
+
+          _, data = @redis.brpop(SIGNAL_QUEUE_KEY, timeout: [remaining, 1].max)
+          if data
+            raw = data.is_a?(String) ? JSON.parse(data) : data
+            signals << raw
+          end
+
+          break if Time.now >= deadline
+        end
+
+        signals
+      end
+
+      # Process signals grouped by symbol
+      # @param raw_signals [Array<Hash>] raw signals from queue
+      def process_grouped_signals(raw_signals)
+        log("Processing #{raw_signals.size} signals for grouping")
+
+        # Group by symbol
+        grouped = @signal_grouper.best_with_alternatives(raw_signals)
+
+        grouped.each do |group|
+          process_symbol_group(group)
+        end
+      end
+
+      # Process a group of signals for one symbol
+      # @param group [Hash] { symbol:, best:, others: }
+      def process_symbol_group(group)
+        symbol = group[:symbol]
+        best_raw = group[:best]
+        other_raws = group[:others] || []
+
+        log("Processing group: #{symbol} (1 best + #{other_raws.size} alternatives)")
+
+        # Validate best signal
+        best_validated = validate_signal(best_raw)
+        return unless best_validated
+
+        # Validate alternatives (skip cooldown/blacklist for these)
+        other_validated = other_raws.map { |raw| validate_signal_minimal(raw) }.compact
+
+        # Send grouped alert
+        send_grouped_alert(best_validated, other_validated, best_raw)
+      end
+
+      # Validate a signal with all checks
+      # @return [ValidatedSignal, nil]
+      def validate_signal(raw_signal)
+        symbol = raw_signal['symbol'] || raw_signal[:symbol]
+        pair_id = raw_signal['pair_id'] || raw_signal[:pair_id]
+
+        # 1. Check blacklist
+        if @blacklist.blocked?(raw_signal)
+          log("  Blocked by blacklist: #{symbol}")
+          record_stat(:blacklist_blocked)
+          log_rejected_signal(raw_signal, 'blacklisted')
+          return nil
+        end
+
+        # 2. Check cooldown (per pair_id)
+        unless @cooldown.can_alert?(symbol, pair_id: pair_id)
+          remaining = @cooldown.remaining_cooldown(symbol, pair_id: pair_id)
+          log("  On cooldown: #{symbol} pair:#{pair_id} (#{remaining}s remaining)")
+          @cooldown.record_blocked
+          record_stat(:cooldown_blocked)
+          log_rejected_signal(raw_signal, 'cooldown')
+          return nil
+        end
+
+        # 3. Build validated signal
+        validated_signal = @signal_builder.build(raw_signal)
+
+        # 4. Check signal type settings
+        unless signal_type_enabled?(validated_signal.signal_type)
+          log("  Signal type disabled: #{validated_signal.signal_type}")
+          record_stat(:type_disabled)
+          log_rejected_signal(raw_signal, "signal_type_disabled:#{validated_signal.signal_type}", validated_signal)
+          return nil
+        end
+
+        # 5. Check if passed safety checks
+        unless validated_signal.status == :valid || validated_signal.signal_type == :lagging
+          rejection_reason = validated_signal.safety_checks[:messages]&.first || 'safety_check_failed'
+          log("  Failed safety checks: #{validated_signal.safety_checks[:messages]&.join(', ')}")
+          record_stat(:safety_failed)
+          log_rejected_signal(raw_signal, rejection_reason, validated_signal)
+          return nil
+        end
+
+        # 6. Check minimum spread
+        current_min_spread = reload_min_spread_setting
+        if validated_signal.spread[:real_pct] < current_min_spread
+          log("  Spread too low: #{validated_signal.spread[:real_pct]}% < #{current_min_spread}%")
+          record_stat(:spread_too_low)
+          log_rejected_signal(raw_signal, "spread_too_low:#{validated_signal.spread[:real_pct]}%", validated_signal)
+          return nil
+        end
+
+        validated_signal
+      end
+
+      # Minimal validation for alternative signals (just build, no cooldown/blacklist)
+      # @return [ValidatedSignal, nil]
+      def validate_signal_minimal(raw_signal)
+        validated_signal = @signal_builder.build(raw_signal)
+        return nil unless validated_signal.status == :valid || validated_signal.signal_type == :lagging
+
+        validated_signal
+      rescue StandardError => e
+        @logger.debug("[AlertJob] validate_signal_minimal error: #{e.message}")
+        nil
+      end
+
+      # Send a grouped alert
+      def send_grouped_alert(best_validated, other_validated, raw_signal)
+        symbol = best_validated.symbol
+
+        # 1. Create signal in PostgreSQL
+        db_signal = create_db_signal(best_validated, raw_signal)
+        strategy = infer_strategy(best_validated, raw_signal)
+        signal_id = db_signal ? Services::Analytics::SignalRepository.short_id(db_signal[:id], strategy) : nil
+
+        # 2. Format grouped alert
+        formatted_message = @formatter.format_grouped_signal(best_validated, other_validated)
+        formatted_message = append_signal_id(formatted_message, signal_id) if signal_id
+
+        # 3. Build keyboard with position tracking button
+        keyboard = nil
+        if db_signal
+          keyboard = Services::Telegram::Keyboards::AlertKeyboard.new(
+            signal_id: db_signal[:id]
+          ).to_reply_markup
+        end
+
+        # 4. Send to Telegram with keyboard
+        result = @notifier.send_alert(formatted_message, reply_markup: keyboard)
+
+        if result
+          # 4. Update signal with telegram message ID
+          if db_signal && result.is_a?(Hash) && result['result']
+            msg_id = result.dig('result', 'message_id')
+            Services::Analytics::SignalRepository.update_telegram_msg_id(db_signal[:id], msg_id) if msg_id
+          end
+
+          # 5. Log spread to PostgreSQL
+          log_spread_to_db(best_validated, raw_signal, db_signal)
+
+          # 6. Start convergence tracking
+          start_convergence_tracking(best_validated, raw_signal, db_signal)
+
+          # 7. Set cooldown
+          cooldown_duration = best_validated.signal_type == :lagging ?
+            @settings[:lagging_alert_cooldown_seconds] :
+            @settings[:alert_cooldown_seconds]
+
+          @cooldown.set_cooldown(symbol, pair_id: raw_signal['pair_id'], seconds: cooldown_duration)
+
+          # 8. Record success
+          record_processed(best_validated)
+          record_stat(:alerts_sent)
+
+          log("  Grouped alert sent: #{signal_id || best_validated.id} (#{best_validated.signal_type}) +#{other_validated.size} alternatives")
+        else
+          log('  Failed to send grouped alert')
+          record_stat(:send_failed)
         end
       end
 
@@ -198,19 +384,35 @@ module ArbitrageBot
         @logger.info("[AlertJob] #{message}")
       end
 
-      def signal_type_enabled?(signal_type)
-        case signal_type
-        when :auto
-          @settings[:enable_auto_signals]
-        when :manual
-          @settings[:enable_manual_signals]
-        when :lagging
-          @settings[:enable_lagging_signals]
-        when :invalid
-          false
+      # Reload just min_spread_pct from Redis for real-time UI changes
+      # More efficient than full reload_settings
+      def reload_min_spread_setting
+        stored_value = @redis.hget(Services::SettingsLoader::REDIS_KEY, 'min_spread_pct')
+        if stored_value
+          stored_value.to_f
         else
-          true
+          @settings[:min_spread_pct] || 2.0
         end
+      rescue StandardError
+        @settings[:min_spread_pct] || 2.0
+      end
+
+      def signal_type_enabled?(signal_type)
+        # Reload signal type settings from Redis for real-time UI changes
+        setting_key = case signal_type
+                      when :auto then 'enable_auto_signals'
+                      when :manual then 'enable_manual_signals'
+                      when :lagging then 'enable_lagging_signals'
+                      when :invalid then return false
+                      else return true
+                      end
+
+        stored = @redis.hget(Services::SettingsLoader::REDIS_KEY, setting_key)
+        return @settings[setting_key.to_sym] if stored.nil?
+
+        %w[true 1 yes].include?(stored.to_s.downcase)
+      rescue StandardError
+        @settings[setting_key.to_sym]
       end
 
       def record_processed(signal)
@@ -237,18 +439,32 @@ module ArbitrageBot
         strategy = infer_strategy(validated_signal, raw_signal)
         signal_class = infer_signal_class(strategy)
 
+        low_venue = validated_signal.low_venue || {}
+        high_venue = validated_signal.high_venue || {}
+        liquidity = validated_signal.liquidity || {}
+
         Services::Analytics::SignalRepository.create(
           strategy: strategy,
           class: signal_class,
           symbol: validated_signal.symbol,
           details: {
             spread_pct: validated_signal.spread[:real_pct],
-            buy_venue: validated_signal.buy[:venue],
-            sell_venue: validated_signal.sell[:venue],
-            buy_price: validated_signal.buy[:price],
-            sell_price: validated_signal.sell[:price],
+            net_spread_pct: validated_signal.spread[:net_pct],
+            buy_venue: venue_display_name(low_venue),
+            sell_venue: venue_display_name(high_venue),
+            buy_price: validated_signal.prices[:buy_price],
+            sell_price: validated_signal.prices[:sell_price],
             signal_type: validated_signal.signal_type,
-            suggested_position_usd: validated_signal.suggested_position_usd
+            suggested_position_usd: validated_signal.suggested_position_usd,
+            # Orderbook liquidity limits
+            liquidity: {
+              max_entry_usd: liquidity[:max_entry_usd],
+              max_buy_usd: liquidity[:max_buy_usd],
+              max_sell_usd: liquidity[:max_sell_usd],
+              exit_usd: liquidity[:exit_usd],
+              low_bids_usd: liquidity[:low_bids_usd],
+              high_asks_usd: liquidity[:high_asks_usd]
+            }
           }
         )
       rescue StandardError => e
@@ -258,12 +474,15 @@ module ArbitrageBot
 
       def infer_strategy(validated_signal, raw_signal)
         # Determine strategy based on venues and signal characteristics
-        buy_venue = validated_signal.buy[:venue].to_s.downcase
-        sell_venue = validated_signal.sell[:venue].to_s.downcase
+        low_venue = validated_signal.low_venue || {}
+        high_venue = validated_signal.high_venue || {}
+
+        low_type = (low_venue[:type] || low_venue['type']).to_s.downcase
+        high_type = (high_venue[:type] || high_venue['type']).to_s.downcase
 
         # Check if it involves perpetual futures (hedged)
-        is_perp = buy_venue.include?('perp') || buy_venue.include?('futures') ||
-                  sell_venue.include?('perp') || sell_venue.include?('futures')
+        is_perp = low_type.include?('perp') || low_type.include?('futures') ||
+                  high_type.include?('perp') || high_type.include?('futures')
 
         if is_perp
           'spatial_hedged'
@@ -286,13 +505,16 @@ module ArbitrageBot
       end
 
       def log_spread_to_db(validated_signal, raw_signal, db_signal)
+        low_venue = validated_signal.low_venue || {}
+        high_venue = validated_signal.high_venue || {}
+
         Services::Analytics::PostgresLogger.log_spread(
           symbol: validated_signal.symbol,
           strategy: infer_strategy(validated_signal, raw_signal),
-          low_venue: validated_signal.buy[:venue],
-          high_venue: validated_signal.sell[:venue],
-          low_price: validated_signal.buy[:price],
-          high_price: validated_signal.sell[:price],
+          low_venue: venue_display_name(low_venue),
+          high_venue: venue_display_name(high_venue),
+          low_price: validated_signal.prices[:buy_price],
+          high_price: validated_signal.prices[:sell_price],
           spread_pct: validated_signal.spread[:real_pct],
           net_spread_pct: validated_signal.spread[:net_pct],
           liquidity_usd: validated_signal.suggested_position_usd,
@@ -307,13 +529,16 @@ module ArbitrageBot
         symbol = raw_signal['symbol'] || raw_signal[:symbol]
 
         if validated_signal
+          low_venue = validated_signal.low_venue || {}
+          high_venue = validated_signal.high_venue || {}
+
           Services::Analytics::PostgresLogger.log_spread(
             symbol: symbol,
             strategy: infer_strategy(validated_signal, raw_signal),
-            low_venue: validated_signal.buy[:venue],
-            high_venue: validated_signal.sell[:venue],
-            low_price: validated_signal.buy[:price],
-            high_price: validated_signal.sell[:price],
+            low_venue: venue_display_name(low_venue),
+            high_venue: venue_display_name(high_venue),
+            low_price: validated_signal.prices[:buy_price],
+            high_price: validated_signal.prices[:sell_price],
             spread_pct: validated_signal.spread[:real_pct],
             net_spread_pct: validated_signal.spread[:net_pct],
             liquidity_usd: validated_signal.suggested_position_usd,
@@ -344,6 +569,44 @@ module ArbitrageBot
         end
       rescue StandardError => e
         @logger.debug("[AlertJob] Failed to log rejected signal: #{e.message}")
+      end
+
+      def venue_display_name(venue)
+        type = (venue[:type] || venue['type'])&.to_sym
+        exchange = venue[:exchange] || venue['exchange']
+        dex = venue[:dex] || venue['dex']
+
+        case type
+        when :cex_futures
+          "#{exchange&.upcase} Futures"
+        when :cex_spot
+          "#{exchange&.upcase} Spot"
+        when :perp_dex
+          "#{dex&.capitalize} Perp"
+        when :dex_spot
+          "#{dex&.capitalize} DEX"
+        else
+          'Unknown'
+        end
+      end
+
+      def start_convergence_tracking(validated_signal, raw_signal, db_signal)
+        return unless db_signal && validated_signal.spread[:real_pct]
+
+        pair_id = raw_signal['pair_id'] || raw_signal[:pair_id] || "#{validated_signal.symbol}_unknown"
+        symbol = validated_signal.symbol
+
+        @convergence_tracker.start_tracking(
+          signal_id: db_signal[:id],
+          symbol: symbol,
+          pair_id: pair_id,
+          initial_spread_pct: validated_signal.spread[:real_pct]
+        )
+
+        # Start spread history tracking for ALL pairs of this symbol
+        @spread_history_tracker.start_tracking(symbol)
+      rescue StandardError => e
+        @logger.error("[AlertJob] Failed to start convergence tracking: #{e.message}")
       end
     end
   end

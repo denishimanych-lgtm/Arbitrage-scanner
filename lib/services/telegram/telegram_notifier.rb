@@ -50,9 +50,34 @@ module ArbitrageBot
 
         # Send an alert (formatted signal)
         # @param formatted_message [String] pre-formatted alert message
+        # @param reply_markup [Hash, nil] optional inline keyboard
         # @return [Hash, nil] response data or nil on failure
-        def send_alert(formatted_message)
-          send_message(formatted_message)
+        def send_alert(formatted_message, reply_markup: nil)
+          if reply_markup
+            send_message_with_keyboard(@chat_id, formatted_message, reply_markup)
+          else
+            send_message(formatted_message)
+          end
+        end
+
+        # Send a message to a specific user (for close notifications)
+        # @param user_id [Integer] Telegram user ID
+        # @param text [String] message text
+        # @param reply_markup [Hash, nil] optional inline keyboard
+        # @return [Hash, nil] response data or nil on failure
+        def send_to_user(user_id, text, reply_markup: nil)
+          return nil unless @bot_token && !@bot_token.empty?
+
+          if reply_markup
+            send_message_with_keyboard(user_id, text, reply_markup)
+          else
+            params = {
+              chat_id: user_id,
+              text: truncate_message(text),
+              disable_web_page_preview: true
+            }
+            make_request('sendMessage', params)
+          end
         end
 
         # Send a photo with caption

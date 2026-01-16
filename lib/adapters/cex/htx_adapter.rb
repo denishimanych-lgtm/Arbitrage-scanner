@@ -60,49 +60,93 @@ module ArbitrageBot
           { coin: coin['currency'].upcase, networks: networks }
         end
 
-        def ticker(symbol)
-          data = get("#{FUTURES_URL}/linear-swap-ex/market/detail/merged?contract_code=#{symbol}")
-
-          t = data['tick']
-          {
-            symbol: symbol,
-            bid: BigDecimal(t['bid'][0].to_s),
-            ask: BigDecimal(t['ask'][0].to_s),
-            last: BigDecimal(t['close'].to_s),
-            timestamp: data['ts'].to_i
-          }
-        end
-
-        def tickers(symbols = nil)
-          data = get("#{FUTURES_URL}/linear-swap-ex/market/detail/batch_merged")
-
-          result = {}
-          data['ticks'].each do |t|
-            next if symbols && !symbols.include?(t['contract_code'])
-            # Skip entries with missing price data
-            next unless t['bid']&.is_a?(Array) && t['ask']&.is_a?(Array)
-            next if t['bid'].empty? || t['ask'].empty? || t['close'].to_s.empty?
-
-            result[t['contract_code']] = {
+        def ticker(symbol, market_type: :futures)
+          if market_type == :spot
+            spot_symbol = symbol.downcase.gsub('-usdt', 'usdt')
+            data = get("#{SPOT_URL}/market/detail/merged?symbol=#{spot_symbol}")
+            t = data['tick']
+            {
+              symbol: symbol,
+              bid: BigDecimal(t['bid'][0].to_s),
+              ask: BigDecimal(t['ask'][0].to_s),
+              last: BigDecimal(t['close'].to_s),
+              timestamp: data['ts'].to_i
+            }
+          else
+            data = get("#{FUTURES_URL}/linear-swap-ex/market/detail/merged?contract_code=#{symbol}")
+            t = data['tick']
+            {
+              symbol: symbol,
               bid: BigDecimal(t['bid'][0].to_s),
               ask: BigDecimal(t['ask'][0].to_s),
               last: BigDecimal(t['close'].to_s),
               timestamp: data['ts'].to_i
             }
           end
-          result
         end
 
-        def orderbook(symbol, depth: 20)
-          # HTX supports: step0-step5, step0 is most granular
-          data = get("#{FUTURES_URL}/linear-swap-ex/market/depth?contract_code=#{symbol}&type=step0")
+        def tickers(symbols = nil, market_type: :futures)
+          if market_type == :spot
+            # HTX doesn't have a batch spot ticker endpoint that returns all at once
+            # so we fetch the market tickers
+            data = get("#{SPOT_URL}/market/tickers")
+            result = {}
+            data['data'].each do |t|
+              next unless t['symbol'].end_with?('usdt')
+              next if t['bid'].to_s.empty? || t['ask'].to_s.empty?
+              next if symbols && !symbols.include?(t['symbol'].upcase)
+              result[t['symbol'].upcase] = {
+                bid: BigDecimal(t['bid'].to_s),
+                ask: BigDecimal(t['ask'].to_s),
+                last: BigDecimal(t['close'].to_s),
+                timestamp: data['ts'].to_i
+              }
+            end
+            result
+          else
+            data = get("#{FUTURES_URL}/linear-swap-ex/market/detail/batch_merged")
+            result = {}
+            data['ticks'].each do |t|
+              next if symbols && !symbols.include?(t['contract_code'])
+              next unless t['bid']&.is_a?(Array) && t['ask']&.is_a?(Array)
+              next if t['bid'].empty? || t['ask'].empty? || t['close'].to_s.empty?
+              result[t['contract_code']] = {
+                bid: BigDecimal(t['bid'][0].to_s),
+                ask: BigDecimal(t['ask'][0].to_s),
+                last: BigDecimal(t['close'].to_s),
+                timestamp: data['ts'].to_i
+              }
+            end
+            result
+          end
+        end
 
-          tick = data['tick']
-          {
-            bids: tick['bids'].first(depth).map { |p, q| [BigDecimal(p.to_s), BigDecimal(q.to_s)] },
-            asks: tick['asks'].first(depth).map { |p, q| [BigDecimal(p.to_s), BigDecimal(q.to_s)] },
-            timestamp: tick['ts'].to_i
-          }
+        def orderbook(symbol, depth: 20, market_type: :futures)
+          depth = depth.to_i
+          # Detect market type - HTX spot uses lowercase symbols like 'btcusdt'
+          is_spot = market_type == :spot || symbol.downcase == symbol || symbol.include?('/')
+
+          if is_spot
+            spot_symbol = symbol.downcase.gsub('/', '').gsub('_', '')
+            data = get("#{SPOT_URL}/market/depth?symbol=#{spot_symbol}&type=step0&depth=#{depth}")
+            tick = data['tick']
+            return nil unless tick && tick['bids'] && tick['asks']
+            {
+              bids: tick['bids'].first(depth).map { |p, q| [BigDecimal(p.to_s), BigDecimal(q.to_s)] },
+              asks: tick['asks'].first(depth).map { |p, q| [BigDecimal(p.to_s), BigDecimal(q.to_s)] },
+              timestamp: tick['ts'].to_i
+            }
+          else
+            # HTX supports: step0-step5, step0 is most granular
+            data = get("#{FUTURES_URL}/linear-swap-ex/market/depth?contract_code=#{symbol}&type=step0")
+            tick = data['tick']
+            return nil unless tick && tick['bids'] && tick['asks']
+            {
+              bids: tick['bids'].first(depth).map { |p, q| [BigDecimal(p.to_s), BigDecimal(q.to_s)] },
+              asks: tick['asks'].first(depth).map { |p, q| [BigDecimal(p.to_s), BigDecimal(q.to_s)] },
+              timestamp: tick['ts'].to_i
+            }
+          end
         end
 
         def funding_rate(symbol)

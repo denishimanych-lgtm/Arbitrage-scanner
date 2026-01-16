@@ -10,6 +10,7 @@ default: &default
 
   # === Liquidity Requirements ===
   min_liquidity_usd: 500000
+  min_dex_liquidity_usd: 1000    # Min DEX pool liquidity (filters dust pools)
   min_exit_liquidity_usd: 5000
   min_volume_24h_dex: 200000
   min_volume_24h_futures: 200000
@@ -31,7 +32,8 @@ default: &default
   min_history_samples: 10
 
   # === Price Staleness ===
-  max_price_age_ms: 5000  # Max age of price data in ms (staleness check)
+  # Must account for full fetch cycle time (15-30 seconds across all exchanges)
+  max_price_age_ms: 60000  # 60 seconds - filter truly stale data only
 
   # === Lagging Exchange Detection ===
   lagging_min_exchanges: 4           # Min exchanges for comparison
@@ -75,6 +77,25 @@ default: &default
     - ethereum
     - bsc
     - arbitrum
+
+  # === Z-Score Statistical Arbitrage ===
+  zscore_entry_threshold: 2.0       # |z| > 2.0 to enter position
+  zscore_stop_threshold: 3.5        # |z| > 3.5 to stop out
+  zscore_exit_threshold: 0.5        # |z| < 0.5 to exit (mean reversion)
+  zscore_lookback_days: 90          # Rolling window for mean/std
+  zscore_min_data_points: 30        # Min samples before calculating
+  enable_zscore_alerts: true
+
+  # === Funding Rate Alerts ===
+  funding_min_rate: 0.0003          # Min rate for alert (0.03%/8h)
+  funding_min_spread: 0.0002        # Min spread for cross-venue alert
+  funding_min_apr: 30               # Min annualized % for alert
+  enable_funding_alerts: true
+
+  # === Stablecoin Depeg Alerts ===
+  stablecoin_alert_threshold: 0.99  # Alert when price < $0.99
+  curve_stress_threshold: 70        # Curve 3pool stress threshold %
+  enable_stablecoin_alerts: true
 
   # === Orderbook Analysis ===
   orderbook_depth: 20  # Number of orderbook levels to fetch

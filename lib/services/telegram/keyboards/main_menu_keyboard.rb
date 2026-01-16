@@ -34,16 +34,25 @@ module ArbitrageBot
             <<~MSG
               🤖 Arbitrage Scanner Bot
 
-              Select an option below to navigate:
+              ═══════ MONITORS ═══════
 
-              📊 Status - System health and statistics
-              📈 Top Spreads - Current best opportunities
-              💰 Funding - Current funding rates
-              📊 Z-Score - Statistical arbitrage monitor
-              💵 Stables - Stablecoin depeg monitor
-              📈 Stats - Trading statistics
-              ⚙️ Settings - Configure thresholds
-              🚫 Blacklist - Manage blocked symbols
+              📊 Status - Workers, uptime, alert stats
+              📈 Top Spreads - Best CEX arbitrage now
+
+              ═══════ STRATEGIES ═══════
+
+              💰 Funding - High funding rate APR
+              📊 Z-Score - Mean reversion signals
+              💵 Stables - USDT/USDC/DAI depeg alerts
+
+              ═══════ ANALYTICS ═══════
+
+              📈 Stats - Your PnL performance
+
+              ═══════ CONFIG ═══════
+
+              ⚙️ Settings - Thresholds, alert types
+              🚫 Blacklist - Block symbols/exchanges
             MSG
           end
 

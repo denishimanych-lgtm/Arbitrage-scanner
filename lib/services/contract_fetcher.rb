@@ -28,6 +28,37 @@ module ArbitrageBot
         'optimistic-ethereum' => 'optimism'
       }.freeze
 
+      # Known major tokens - prefer these over meme tokens with same symbol
+      KNOWN_TOKENS = {
+        'BTC' => 'bitcoin',
+        'ETH' => 'ethereum',
+        'SOL' => 'solana',
+        'BNB' => 'binancecoin',
+        'XRP' => 'ripple',
+        'ADA' => 'cardano',
+        'DOGE' => 'dogecoin',
+        'DOT' => 'polkadot',
+        'LINK' => 'chainlink',
+        'AVAX' => 'avalanche-2',
+        'MATIC' => 'matic-network',
+        'UNI' => 'uniswap',
+        'ATOM' => 'cosmos',
+        'LTC' => 'litecoin',
+        'TRX' => 'tron',
+        'NEAR' => 'near',
+        'SHIB' => 'shiba-inu',
+        'BCH' => 'bitcoin-cash',
+        'APT' => 'aptos',
+        'ARB' => 'arbitrum',
+        'OP' => 'optimism',
+        'FIL' => 'filecoin',
+        'HBAR' => 'hedera-hashgraph',
+        'VET' => 'vechain',
+        'ALGO' => 'algorand',
+        'ICP' => 'internet-computer',
+        'ETC' => 'ethereum-classic'
+      }.freeze
+
       def initialize
         @coingecko_key = ENV['COINGECKO_API_KEY']
         @cmc_key = ENV['COINMARKETCAP_API_KEY']
@@ -61,14 +92,14 @@ module ArbitrageBot
 
         contracts = {}
 
-        # Try CoinGecko first
-        if @coingecko_key && !@coingecko_key.empty?
-          contracts = fetch_from_coingecko(symbol)
+        # Try CMC first - better at handling symbol collisions (uses market cap rank)
+        if @cmc_key && !@cmc_key.empty?
+          contracts = fetch_from_cmc(symbol)
         end
 
-        # Try CMC if CoinGecko didn't find anything
-        if contracts.empty? && @cmc_key && !@cmc_key.empty?
-          contracts = fetch_from_cmc(symbol)
+        # Fall back to CoinGecko if CMC didn't find anything
+        if contracts.empty? && @coingecko_key && !@coingecko_key.empty?
+          contracts = fetch_from_coingecko(symbol)
         end
 
         # Cache result (even empty, to avoid repeated lookups)
@@ -141,27 +172,44 @@ module ArbitrageBot
       end
 
       def fetch_from_cmc(symbol)
+        # Step 1: Get all tokens with this symbol using /cryptocurrency/map
+        # This returns multiple tokens when symbol collides, with their market cap rank
         wait_for_rate_limit(:cmc)
         record_call(:cmc)
 
-        url = "#{CMC_BASE}/cryptocurrency/info?symbol=#{symbol}"
-        data = get_json(url, headers: { 'X-CMC_PRO_API_KEY' => @cmc_key })
+        map_url = "#{CMC_BASE}/cryptocurrency/map?symbol=#{symbol}"
+        map_data = get_json(map_url, headers: { 'X-CMC_PRO_API_KEY' => @cmc_key })
 
-        return {} unless data && data['data'] && data['data'][symbol]
+        return {} unless map_data && map_data['data'] && map_data['data'].any?
 
-        coin_data = data['data'][symbol]
-        coin_data = coin_data.first if coin_data.is_a?(Array)
+        # Step 2: Select the token with best (lowest) rank - most likely the one on CEX
+        tokens = map_data['data']
+        best_token = tokens.min_by { |t| t['rank'] || 999999 }
+
+        log("CMC: #{symbol} has #{tokens.size} tokens, selected ID #{best_token['id']} (#{best_token['name']}, rank #{best_token['rank'] || 'unranked'})")
+
+        # Step 3: Get full info with all contract addresses using the CMC ID
+        wait_for_rate_limit(:cmc)
+        record_call(:cmc)
+
+        info_url = "#{CMC_BASE}/cryptocurrency/info?id=#{best_token['id']}"
+        info_data = get_json(info_url, headers: { 'X-CMC_PRO_API_KEY' => @cmc_key })
+
+        return {} unless info_data && info_data['data']
+
+        coin_data = info_data['data'][best_token['id'].to_s]
+        return {} unless coin_data
 
         contracts = {}
 
-        # Get contract addresses from platform field
+        # Get contract from platform field (primary chain)
         if coin_data['platform']
           platform = coin_data['platform']
           chain = normalize_cmc_chain(platform['name'] || platform['slug'])
           contracts[chain] = platform['token_address'] if chain && platform['token_address']
         end
 
-        # Also check contract_address array if present
+        # Get all contracts from contract_address array (multi-chain tokens)
         if coin_data['contract_address'].is_a?(Array)
           coin_data['contract_address'].each do |contract|
             chain = normalize_cmc_chain(contract['platform']&.dig('name') || contract['platform']&.dig('slug'))
@@ -171,6 +219,7 @@ module ArbitrageBot
           end
         end
 
+        log("CMC: #{symbol} contracts: #{contracts.keys.join(', ')}") if contracts.any?
         contracts
       rescue StandardError => e
         handle_api_error('CMC', e)
@@ -178,10 +227,15 @@ module ArbitrageBot
       end
 
       def get_coingecko_id(symbol)
-        # Build or use cached symbol -> ID map
+        sym_upper = symbol.upcase
+
+        # Check known tokens first (avoids meme token collisions)
+        return KNOWN_TOKENS[sym_upper] if KNOWN_TOKENS[sym_upper]
+
+        # Build or use cached symbol -> ID map for unknown tokens
         @symbol_id_map ||= build_coingecko_symbol_map
 
-        @symbol_id_map[symbol.upcase]
+        @symbol_id_map[sym_upper]
       end
 
       def build_coingecko_symbol_map

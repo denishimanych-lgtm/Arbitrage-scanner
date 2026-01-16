@@ -58,43 +58,78 @@ module ArbitrageBot
           { coin: asset, networks: networks }
         end
 
-        def ticker(symbol)
-          data = get("#{BASE_URL}/futures/usdt/tickers?contract=#{symbol}")
-
-          t = data.first
-          {
-            symbol: t['contract'],
-            bid: BigDecimal(t['highest_bid']),
-            ask: BigDecimal(t['lowest_ask']),
-            last: BigDecimal(t['last']),
-            timestamp: (Time.now.to_f * 1000).to_i
-          }
-        end
-
-        def tickers(symbols = nil)
-          data = get("#{BASE_URL}/futures/usdt/tickers")
-
-          result = {}
-          data.each do |t|
-            next if symbols && !symbols.include?(t['contract'])
-            result[t['contract']] = {
+        def ticker(symbol, market_type: :futures)
+          if market_type == :spot
+            data = get("#{BASE_URL}/spot/tickers?currency_pair=#{symbol}")
+            t = data.first
+            {
+              symbol: t['currency_pair'],
+              bid: BigDecimal(t['highest_bid']),
+              ask: BigDecimal(t['lowest_ask']),
+              last: BigDecimal(t['last']),
+              timestamp: (Time.now.to_f * 1000).to_i
+            }
+          else
+            data = get("#{BASE_URL}/futures/usdt/tickers?contract=#{symbol}")
+            t = data.first
+            {
+              symbol: t['contract'],
               bid: BigDecimal(t['highest_bid']),
               ask: BigDecimal(t['lowest_ask']),
               last: BigDecimal(t['last']),
               timestamp: (Time.now.to_f * 1000).to_i
             }
           end
-          result
         end
 
-        def orderbook(symbol, depth: 20)
-          data = get("#{BASE_URL}/futures/usdt/order_book?contract=#{symbol}&limit=#{depth}")
+        def tickers(symbols = nil, market_type: :futures)
+          if market_type == :spot
+            data = get("#{BASE_URL}/spot/tickers")
+            result = {}
+            data.each do |t|
+              next if symbols && !symbols.include?(t['currency_pair'])
+              # Skip entries with empty or missing price data
+              next if t['highest_bid'].to_s.empty? || t['lowest_ask'].to_s.empty? || t['last'].to_s.empty?
+              result[t['currency_pair']] = {
+                bid: BigDecimal(t['highest_bid']),
+                ask: BigDecimal(t['lowest_ask']),
+                last: BigDecimal(t['last']),
+                timestamp: (Time.now.to_f * 1000).to_i
+              }
+            end
+            result
+          else
+            data = get("#{BASE_URL}/futures/usdt/tickers")
+            result = {}
+            data.each do |t|
+              next if symbols && !symbols.include?(t['contract'])
+              result[t['contract']] = {
+                bid: BigDecimal(t['highest_bid']),
+                ask: BigDecimal(t['lowest_ask']),
+                last: BigDecimal(t['last']),
+                timestamp: (Time.now.to_f * 1000).to_i
+              }
+            end
+            result
+          end
+        end
 
-          {
-            bids: data['bids'].map { |l| [BigDecimal(l['p']), BigDecimal(l['s'])] },
-            asks: data['asks'].map { |l| [BigDecimal(l['p']), BigDecimal(l['s'])] },
-            timestamp: (data['current'].to_f * 1000).to_i
-          }
+        def orderbook(symbol, depth: 20, market_type: :futures)
+          if market_type == :spot
+            data = get("#{BASE_URL}/spot/order_book?currency_pair=#{symbol}&limit=#{depth}")
+            {
+              bids: data['bids'].map { |l| [BigDecimal(l[0]), BigDecimal(l[1])] },
+              asks: data['asks'].map { |l| [BigDecimal(l[0]), BigDecimal(l[1])] },
+              timestamp: (Time.now.to_f * 1000).to_i
+            }
+          else
+            data = get("#{BASE_URL}/futures/usdt/order_book?contract=#{symbol}&limit=#{depth}")
+            {
+              bids: data['bids'].map { |l| [BigDecimal(l['p']), BigDecimal(l['s'])] },
+              asks: data['asks'].map { |l| [BigDecimal(l['p']), BigDecimal(l['s'])] },
+              timestamp: (data['current'].to_f * 1000).to_i
+            }
+          end
         end
 
         def funding_rate(symbol)

@@ -21,11 +21,17 @@ module ArbitrageBot
 
           return nil unless response
 
+          bid = response[:bid].to_f
+          ask = response[:ask].to_f
+
+          # Skip zero or invalid prices
+          return nil if bid <= 0 || ask <= 0
+
           PriceData.new(
             symbol: symbol,
-            bid: response[:bid],
-            ask: response[:ask],
-            mid: response[:mid] || ((response[:bid] + response[:ask]) / 2),
+            bid: bid,
+            ask: ask,
+            mid: response[:mid] || ((bid + ask) / 2),
             mark_price: response[:mark_price],
             index_price: response[:index_price],
             funding_rate: response[:funding_rate],
@@ -41,11 +47,18 @@ module ArbitrageBot
           response = adapter.tickers(symbols)
           received_at = (Time.now.to_f * 1000).to_i
 
-          response.transform_values do |data|
-            PriceData.new(
+          result = {}
+          response.each do |symbol, data|
+            bid = data[:bid].to_f
+            ask = data[:ask].to_f
+
+            # Skip zero or invalid prices (root cause of fake spreads)
+            next if bid <= 0 || ask <= 0
+
+            result[symbol] = PriceData.new(
               symbol: data[:symbol],
-              bid: data[:bid],
-              ask: data[:ask],
+              bid: bid,
+              ask: ask,
               mid: data[:mid] || data[:mark_price],
               mark_price: data[:mark_price],
               index_price: data[:index_price],
@@ -55,6 +68,7 @@ module ArbitrageBot
               received_at: received_at
             )
           end
+          result
         end
 
         # Fetch from all Perp DEXes
