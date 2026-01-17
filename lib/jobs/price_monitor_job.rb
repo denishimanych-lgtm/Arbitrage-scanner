@@ -27,6 +27,10 @@ module ArbitrageBot
         @baseline_collector = Services::Analytics::SpreadBaselineCollector.new
         @spread_history_tracker = Services::Analytics::SpreadHistoryTracker.new
         @stale_count = 0
+
+        # Digest mode support - direct accumulation without orderbook queue
+        @digest_accumulator = Services::Alerts::DigestAccumulator.new
+        @coin_mode_manager = Services::Alerts::CoinModeManager.new
       end
 
       # Run single price collection cycle
@@ -57,16 +61,23 @@ module ArbitrageBot
         log("Calculated #{spreads.size} spreads")
 
         # Record baseline statistics (background spread data)
+        log('Recording baseline samples...')
         record_baseline_samples(spreads)
 
         # Cache spreads
+        log('Caching spreads...')
         cache_spreads(spreads)
+        log('Spreads cached')
 
         # Record spread history for tracked pairs
+        log('Recording spread history...')
         @spread_history_tracker.record(spreads)
+        log('Spread history recorded')
 
         # Trigger orderbook analysis for high spreads
+        log('Triggering analysis...')
         trigger_analysis(spreads)
+        log('Analysis triggered')
 
         elapsed = ((Time.now - start_time) * 1000).round
         log("Price collection complete: #{all_prices.size} prices, #{spreads.size} spreads (#{elapsed}ms)")
@@ -508,6 +519,8 @@ module ArbitrageBot
         current_min_spread = reload_min_spread_setting
         min_dex_liq = reload_min_dex_liquidity_setting
 
+        log("Filter settings: min_spread=#{current_min_spread}%, min_dex_liq=$#{min_dex_liq}")
+
         high_spreads = spreads.select do |s|
           spread_pct = s[:spread_pct].abs
           next false if spread_pct < current_min_spread
@@ -537,13 +550,105 @@ module ArbitrageBot
           true
         end
 
-        high_spreads.each do |spread|
+        log("High spreads after filter: #{high_spreads.size}")
+
+        # Route signals based on coin mode
+        realtime_count = 0
+        digest_count = 0
+        errors_count = 0
+
+        log("Starting routing loop for #{high_spreads.size} spreads...")
+        high_spreads.each_with_index do |spread, idx|
+          log("Routing #{idx + 1}/#{high_spreads.size}: #{spread[:symbol]}") if idx % 50 == 0
+          symbol = spread[:symbol]
           spread[:detected_at] = Time.now.to_i
-          ArbitrageBot.redis.lpush('queue:orderbook_analysis', spread.to_json)
-          ArbitrageBot.redis.ltrim('queue:orderbook_analysis', 0, 999)
+
+          begin
+            log("  Checking realtime mode for #{symbol}...") if idx == 0
+            is_realtime = @coin_mode_manager.realtime?(symbol)
+            log("  realtime=#{is_realtime}") if idx == 0
+
+            if is_realtime
+              # Real-time mode: send to orderbook queue for full analysis
+              log("  Sending to orderbook queue") if idx == 0
+              ArbitrageBot.redis.lpush('queue:orderbook_analysis', spread.to_json)
+              realtime_count += 1
+            else
+              # Digest mode: accumulate directly (fast path, skip orderbook)
+              log("  Calling accumulate_for_digest...") if idx == 0
+              accumulate_for_digest(spread)
+              log("  Done accumulating") if idx == 0
+              digest_count += 1
+            end
+          rescue StandardError => e
+            @logger.error("[PriceMonitor] Routing error at idx=#{idx}: #{e.class}: #{e.message}")
+            errors_count += 1
+          end
         end
 
-        log("Triggered analysis for #{high_spreads.size} high spreads") if high_spreads.any?
+        log("Routing loop complete: #{realtime_count} realtime, #{digest_count} digest, #{errors_count} errors")
+
+        # Trim orderbook queue
+        ArbitrageBot.redis.ltrim('queue:orderbook_analysis', 0, 999) if realtime_count > 0
+
+        log("Triggered analysis: #{realtime_count} to orderbook, #{digest_count} to digest")
+      end
+
+      # Accumulate spread directly to digest (without orderbook analysis)
+      # Uses cached price data - less accurate but much faster
+      def accumulate_for_digest(spread)
+        # Use thread-local Redis directly to avoid initialization issues
+        redis = ArbitrageBot.redis
+        symbol = spread[:symbol]
+
+        # Simple category detection
+        low_type = (spread[:low_venue][:type] rescue 'unknown').to_s
+        high_type = (spread[:high_venue][:type] rescue 'unknown').to_s
+
+        category = if low_type.include?('spot') && high_type.include?('futures')
+                     :sf
+                   elsif low_type.include?('spot') && high_type.include?('spot')
+                     :ss
+                   else
+                     :other
+                   end
+
+        # Build minimal entry
+        entry = {
+          symbol: symbol,
+          pair_id: spread[:pair_id],
+          category: category,
+          spread_pct: spread[:spread_pct].to_f.round(2),
+          net_spread_pct: (spread[:spread_pct] - 0.4).round(2),
+          low_venue: { exchange: spread[:low_venue][:exchange], type: low_type },
+          high_venue: { exchange: spread[:high_venue][:exchange], type: high_type },
+          buy_price: spread[:buy_price].to_f,
+          sell_price: spread[:sell_price].to_f,
+          liquidity_usd: 0,
+          transfer_available: nil,
+          timestamp: Time.now.to_i
+        }
+
+        # Get current digest window
+        window_id = (Time.now.to_i / 900) * 900
+        window_key = "digest:accumulated:#{window_id}"
+        field = "#{symbol}:#{category}"
+
+        # Check if better than existing
+        existing = redis.hget(window_key, field)
+        if existing
+          existing_spread = JSON.parse(existing)['spread_pct'].to_f rescue 0
+          return false if spread[:spread_pct].to_f <= existing_spread
+        end
+
+        # Store
+        redis.hset(window_key, field, entry.to_json)
+        redis.expire(window_key, 1800)
+
+        true
+      rescue StandardError => e
+        @logger.error("[PriceMonitor] accumulate_for_digest error: #{e.class}: #{e.message}")
+        false
       end
 
       def venue_price_key(venue, fallback_symbol = nil)

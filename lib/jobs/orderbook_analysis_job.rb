@@ -33,7 +33,7 @@ module ArbitrageBot
         spread = spread_data.is_a?(String) ? JSON.parse(spread_data) : spread_data
 
         # Skip signals that are too old (stale data)
-        max_signal_age_sec = @settings[:max_signal_age_sec] || 120
+        max_signal_age_sec = (@settings[:max_signal_age_sec] || 300).to_i
         detected_at = spread['detected_at'] || spread[:detected_at]
         if detected_at
           age_sec = Time.now.to_i - detected_at.to_i

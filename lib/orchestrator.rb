@@ -93,6 +93,7 @@ module ArbitrageBot
       if @options[:alerts]
         @convergence_job = Jobs::ConvergenceCheckJob.new(@settings)
         @position_check_job = Jobs::PositionCheckJob.new
+        @digest_job = Jobs::DigestJob.new(@settings)
       end
 
       if @options[:telegram_bot]
@@ -221,6 +222,19 @@ module ArbitrageBot
         log('Started position tracker')
       end
 
+      # Digest job worker thread (15-min digest alerts)
+      if @options[:alerts] && @digest_job
+        @threads[:digest] = Thread.new do
+          Thread.current.name = 'digest'
+          begin
+            @digest_job.run_loop
+          rescue StandardError => e
+            log("Digest job error: #{e.message}", :error)
+          end
+        end
+        log('Started digest worker')
+      end
+
       # Telegram bot thread
       if @options[:telegram_bot] && @telegram_bot
         @threads[:telegram] = Thread.new do
@@ -288,7 +302,18 @@ module ArbitrageBot
     def restart_thread(name)
       case name
       when :price_monitor
-        @threads[:price_monitor] = Thread.new { price_monitor_loop }
+        @threads[:price_monitor] = Thread.new do
+          Thread.current.name = 'price_monitor'
+          loop do
+            break unless @running
+            begin
+              @price_monitor.perform
+            rescue StandardError => e
+              log("Price monitor error: #{e.message}", :error)
+            end
+            sleep(@settings[:price_update_interval_sec] || 1)
+          end
+        end
       when :orderbook
         @threads[:orderbook] = Thread.new { @orderbook_job.run_loop }
       when :alerts

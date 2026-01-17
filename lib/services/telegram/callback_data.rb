@@ -61,7 +61,15 @@ module ArbitrageBot
           enter_pos: 'ep',
           close_pos: 'cp',
           positions: 'po',
-          posclose: 'pc'
+          posclose: 'pc',
+          # DEPEG position tracking
+          enter_depeg: 'ed',
+          close_depeg: 'cd2',
+          # Digest mode
+          track_coin: 'tc',      # Enable real-time for coin
+          untrack_coin: 'uc',    # Disable real-time (back to digest)
+          digest_more: 'dm',     # Show more coins
+          digest_stats: 'ds2'    # Show digest statistics
         }.freeze
 
         # Reverse mappings for decoding

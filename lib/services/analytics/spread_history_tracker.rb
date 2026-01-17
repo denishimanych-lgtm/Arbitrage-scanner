@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require 'timeout'
+
 module ArbitrageBot
   module Services
     module Analytics
@@ -39,42 +41,20 @@ module ArbitrageBot
           false
         end
 
+        # Timeout for the record operation
+        RECORD_TIMEOUT = 30  # seconds
+
         # Record current spreads to history (only for tracked symbols)
         # Called from PriceMonitorJob after calculating spreads
         # @param spreads [Array<Hash>] current spreads
         def record(spreads)
           return if spreads.nil? || spreads.empty?
 
-          now = Time.now.to_i
-          recorded = 0
-
-          spreads.each do |spread|
-            pair_id = spread[:pair_id] || spread['pair_id']
-            symbol = spread[:symbol] || spread['symbol']
-            spread_pct = (spread[:spread_pct] || spread['spread_pct']).to_f.abs
-
-            next unless pair_id && symbol && spread_pct > 0
-
-            # Only record for tracked symbols (those that had an alert)
-            next unless tracking_symbol?(symbol)
-
-            key = history_key(pair_id, symbol)
-
-            # Rate limit: save at most once per minute per pair
-            last = @last_saved[key] || 0
-            next if now - last < SAMPLE_INTERVAL
-
-            # Save to sorted set: score = timestamp, member = spread value
-            @redis.zadd(key, now, "#{now}:#{spread_pct.round(4)}")
-            @last_saved[key] = now
-            recorded += 1
-
-            # Set TTL on first write (will refresh on each write)
-            @redis.expire(key, HISTORY_TTL)
+          Timeout.timeout(RECORD_TIMEOUT) do
+            record_internal(spreads)
           end
-
-          # Periodically clean old entries (every ~100 records)
-          cleanup_old_entries if recorded > 0 && rand < 0.01
+        rescue Timeout::Error
+          @logger.warn("[SpreadHistoryTracker] record timed out after #{RECORD_TIMEOUT}s")
         rescue StandardError => e
           @logger.debug("[SpreadHistoryTracker] record error: #{e.message}")
         end
@@ -129,6 +109,73 @@ module ArbitrageBot
         end
 
         private
+
+        def record_internal(spreads)
+          start = Time.now
+          now = Time.now.to_i
+          recorded = 0
+
+          # Pre-fetch all tracked symbols to avoid N Redis calls
+          @logger.debug("[SpreadHistoryTracker] Getting tracked symbols...")
+          tracked_symbols = get_all_tracked_symbols
+          @logger.debug("[SpreadHistoryTracker] Got #{tracked_symbols.size} tracked symbols in #{((Time.now - start) * 1000).round}ms")
+
+          spreads.each do |spread|
+            pair_id = spread[:pair_id] || spread['pair_id']
+            symbol = spread[:symbol] || spread['symbol']
+            spread_pct = (spread[:spread_pct] || spread['spread_pct']).to_f.abs
+
+            next unless pair_id && symbol && spread_pct > 0
+
+            # Only record for tracked symbols (those that had an alert)
+            # Use pre-fetched set for O(1) lookup instead of Redis call
+            next unless tracked_symbols.include?(symbol)
+
+            key = history_key(pair_id, symbol)
+
+            # Rate limit: save at most once per minute per pair
+            last = @last_saved[key] || 0
+            next if now - last < SAMPLE_INTERVAL
+
+            # Save to sorted set: score = timestamp, member = spread value
+            @redis.zadd(key, now, "#{now}:#{spread_pct.round(4)}")
+            @last_saved[key] = now
+            recorded += 1
+
+            # Set TTL on first write (will refresh on each write)
+            @redis.expire(key, HISTORY_TTL)
+          end
+
+          # Periodically clean old entries (every ~100 records)
+          cleanup_old_entries if recorded > 0 && rand < 0.01
+
+          @logger.debug("[SpreadHistoryTracker] Recorded #{recorded} entries for #{tracked_symbols.size} tracked symbols")
+        end
+
+        # Get all currently tracked symbols
+        # @return [Set<String>] set of tracked symbol names
+        def get_all_tracked_symbols
+          pattern = "#{TRACKING_KEY_PREFIX}:symbol:*"
+
+          # Use KEYS for simplicity (safe for small number of tracking keys)
+          # In production with many tracked symbols, consider SCAN with timeout
+          keys = Timeout.timeout(5) { @redis.keys(pattern) }
+
+          tracked = Set.new
+          keys.each do |key|
+            # Extract symbol from key: "spread_tracking:symbol:BTC" -> "BTC"
+            symbol = key.sub("#{TRACKING_KEY_PREFIX}:symbol:", '')
+            tracked.add(symbol)
+          end
+
+          tracked
+        rescue Timeout::Error
+          @logger.warn("[SpreadHistoryTracker] get_all_tracked_symbols timed out")
+          Set.new
+        rescue StandardError => e
+          @logger.debug("[SpreadHistoryTracker] get_all_tracked_symbols error: #{e.message}")
+          Set.new
+        end
 
         def history_key(pair_id, symbol)
           "#{HISTORY_KEY_PREFIX}:#{pair_id}:#{symbol}"

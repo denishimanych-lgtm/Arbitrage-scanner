@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require 'timeout'
+
 module ArbitrageBot
   module Services
     module PriceFetcher
@@ -14,6 +16,9 @@ module ArbitrageBot
 
         # Default minimum liquidity (can be overridden via settings)
         DEFAULT_MIN_LIQUIDITY_USD = 1000
+
+        # Total timeout for all DEX fetches (seconds)
+        TOTAL_FETCH_TIMEOUT = 180
 
         def initialize
           @logger = ArbitrageBot.logger
@@ -30,12 +35,18 @@ module ArbitrageBot
 
           @logger.info("[DexBulkPriceFetcher] Fetching prices for #{tokens_by_chain.values.sum(&:size)} tokens across #{tokens_by_chain.size} chains")
 
-          tokens_by_chain.each do |chain, tokens|
-            chain_prices = fetch_chain_prices(chain, tokens)
-            prices.merge!(chain_prices)
+          # Wrap entire fetch in a timeout to prevent blocking price monitor
+          Timeout.timeout(TOTAL_FETCH_TIMEOUT) do
+            tokens_by_chain.each do |chain, tokens|
+              chain_prices = fetch_chain_prices(chain, tokens)
+              prices.merge!(chain_prices)
+            end
           end
 
           @logger.info("[DexBulkPriceFetcher] Fetched #{prices.size} valid DEX prices")
+          prices
+        rescue Timeout::Error
+          @logger.warn("[DexBulkPriceFetcher] Total timeout reached, returning #{prices.size} partial prices")
           prices
         end
 
@@ -83,6 +94,9 @@ module ArbitrageBot
           tokens_by_chain
         end
 
+        # Timeout for fetching a single chain's prices (seconds)
+        CHAIN_FETCH_TIMEOUT = 60
+
         # Fetch prices for all tokens on a chain
         # @param chain [String] blockchain name
         # @param tokens [Array<Hash>] tokens with symbol, address, dex
@@ -95,8 +109,10 @@ module ArbitrageBot
 
           @logger.info("[DexBulkPriceFetcher] Fetching #{addresses.size} tokens on #{chain}")
 
-          # Bulk fetch from DexScreener
-          dexscreener_data = @dexscreener.fetch_tokens_bulk(chain, addresses)
+          # Bulk fetch from DexScreener with timeout
+          dexscreener_data = Timeout.timeout(CHAIN_FETCH_TIMEOUT) do
+            @dexscreener.fetch_tokens_bulk(chain, addresses)
+          end
 
           # Get CEX prices for cross-validation (prevents wrapped asset pricing errors)
           cex_prices = get_cex_reference_prices
@@ -144,6 +160,12 @@ module ArbitrageBot
             )
           end
 
+          prices
+        rescue Timeout::Error
+          @logger.warn("[DexBulkPriceFetcher] Timeout fetching #{chain} (#{addresses.size} tokens)")
+          prices
+        rescue StandardError => e
+          @logger.error("[DexBulkPriceFetcher] Error fetching #{chain}: #{e.message}")
           prices
         end
 

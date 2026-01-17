@@ -86,6 +86,7 @@ module ArbitrageBot
         lib/services/zscore/zscore_tracker
         lib/services/zscore/zscore_alerter
         lib/services/stablecoin/depeg_monitor
+        lib/services/stablecoin/depeg_history_tracker
         lib/services/stablecoin/depeg_alerter
         lib/adapters/defi/curve_adapter
         lib/adapters/cex/base_adapter
@@ -127,6 +128,9 @@ module ArbitrageBot
         lib/services/alerts/cooldown_manager
         lib/services/alerts/blacklist
         lib/services/alerts/signal_grouper
+        lib/services/alerts/digest_accumulator
+        lib/services/alerts/digest_formatter
+        lib/services/alerts/coin_mode_manager
         lib/services/telegram/callback_data
         lib/services/telegram/state/user_state
         lib/services/telegram/state/navigation_stack
@@ -141,6 +145,7 @@ module ArbitrageBot
         lib/services/telegram/telegram_notifier
         lib/services/telegram/bot
         lib/jobs/alert_job
+        lib/jobs/digest_job
         lib/jobs/funding_rate_job
         lib/jobs/zscore_monitor_job
         lib/jobs/stablecoin_monitor_job

@@ -36,6 +36,10 @@ module ArbitrageBot
         @signal_grouper = Services::Alerts::SignalGrouper.new
         @spread_history_tracker = Services::Analytics::SpreadHistoryTracker.new
 
+        # Digest mode components
+        @digest_accumulator = Services::Alerts::DigestAccumulator.new
+        @coin_mode_manager = Services::Alerts::CoinModeManager.new
+
         log('AlertJob initialized')
       end
 
@@ -196,23 +200,137 @@ module ArbitrageBot
       end
 
       # Process a group of signals for one symbol
+      # Routes to real-time alert or digest accumulator based on coin mode
       # @param group [Hash] { symbol:, best:, others: }
       def process_symbol_group(group)
         symbol = group[:symbol]
-        best_raw = group[:best]
-        other_raws = group[:others] || []
+        all_raws = [group[:best]] + (group[:others] || [])
 
-        log("Processing group: #{symbol} (1 best + #{other_raws.size} alternatives)")
+        log("Processing group: #{symbol} with #{all_raws.size} signals")
 
-        # Validate best signal
-        best_validated = validate_signal(best_raw)
-        return unless best_validated
+        # Validate ALL signals and collect valid ones with their raw data
+        validated_pairs = all_raws.filter_map do |raw|
+          next nil unless raw
 
-        # Validate alternatives (skip cooldown/blacklist for these)
-        other_validated = other_raws.map { |raw| validate_signal_minimal(raw) }.compact
+          validated = validate_signal_for_grouping(raw)
+          next nil unless validated
 
-        # Send grouped alert
-        send_grouped_alert(best_validated, other_validated, best_raw)
+          spread = validated.spread[:real_pct] || 0
+          { validated: validated, raw: raw, spread: spread }
+        end
+
+        if validated_pairs.empty?
+          log("  No valid signals in group for #{symbol}")
+          return
+        end
+
+        # Sort by spread (highest first) and pick the best
+        sorted = validated_pairs.sort_by { |p| -p[:spread].abs }
+        best_pair = sorted.first
+        other_validated = sorted[1..4].map { |p| p[:validated] }
+
+        log("  Best valid signal: #{best_pair[:spread].round(1)}% (#{sorted.size} valid of #{all_raws.size} total)")
+
+        # Check coin mode: real-time or digest
+        if @coin_mode_manager.realtime?(symbol)
+          # Real-time mode: send alert immediately
+          log("  #{symbol} in REAL-TIME mode, sending alert")
+          send_grouped_alert(best_pair[:validated], other_validated, best_pair[:raw])
+
+          # Record observation for convergence tracking
+          @coin_mode_manager.record_observation(symbol, {
+            spread_pct: best_pair[:spread],
+            pair_id: best_pair[:raw]['pair_id'] || best_pair[:raw][:pair_id],
+            category: determine_category(best_pair[:raw])
+          })
+        else
+          # Digest mode: accumulate signal
+          log("  #{symbol} in DIGEST mode, accumulating")
+          accumulate_for_digest(best_pair[:validated], best_pair[:raw])
+        end
+      end
+
+      # Accumulate validated signal for digest
+      def accumulate_for_digest(validated_signal, raw_signal)
+        # Build signal data for accumulator
+        signal_data = {
+          symbol: validated_signal.symbol,
+          pair_id: raw_signal['pair_id'] || raw_signal[:pair_id],
+          low_venue: validated_signal.low_venue,
+          high_venue: validated_signal.high_venue,
+          spread: validated_signal.spread,
+          liquidity: validated_signal.liquidity,
+          prices: validated_signal.prices
+        }
+
+        @digest_accumulator.add(signal_data)
+      end
+
+      # Determine pair category for tracking
+      def determine_category(raw_signal)
+        low_venue = raw_signal[:low_venue] || raw_signal['low_venue'] || {}
+        high_venue = raw_signal[:high_venue] || raw_signal['high_venue'] || {}
+
+        low_type = (low_venue[:type] || low_venue['type']).to_s.downcase
+        high_type = (high_venue[:type] || high_venue['type']).to_s.downcase
+
+        if low_type.include?('spot') && high_type.include?('futures')
+          :sf
+        elsif low_type.include?('spot') && high_type.include?('spot')
+          :ss
+        else
+          :other
+        end
+      end
+
+      # Validate signal for grouping - checks blacklist, cooldown, type, safety, spread
+      # @return [ValidatedSignal, nil]
+      def validate_signal_for_grouping(raw_signal)
+        symbol = raw_signal['symbol'] || raw_signal[:symbol]
+        pair_id = raw_signal['pair_id'] || raw_signal[:pair_id]
+
+        # 1. Check blacklist
+        if @blacklist.blocked?(raw_signal)
+          log("  Skipped blacklisted: #{pair_id}")
+          return nil
+        end
+
+        # 2. Check cooldown (per pair_id)
+        unless @cooldown.can_alert?(symbol, pair_id: pair_id)
+          log("  Skipped on cooldown: #{pair_id}")
+          return nil
+        end
+
+        # 3. Build validated signal
+        validated_signal = @signal_builder.build(raw_signal)
+
+        # 4. Check signal type settings
+        unless signal_type_enabled?(validated_signal.signal_type)
+          log("  Skipped type disabled: #{validated_signal.signal_type}")
+          return nil
+        end
+
+        # 5. Check if passed safety checks (allow fallback signals through)
+        is_fallback = (raw_signal[:type] || raw_signal['type']) == :fallback ||
+                      (raw_signal[:type] || raw_signal['type']) == 'fallback' ||
+                      raw_signal[:fallback_signal] || raw_signal['fallback_signal']
+
+        unless validated_signal.status == :valid || validated_signal.signal_type == :lagging || is_fallback
+          log("  Skipped safety failed: #{validated_signal.safety_checks[:messages]&.first}")
+          return nil
+        end
+
+        # 6. Check minimum spread
+        current_min_spread = reload_min_spread_setting
+        if validated_signal.spread[:real_pct] < current_min_spread
+          log("  Skipped spread too low: #{validated_signal.spread[:real_pct]}%")
+          return nil
+        end
+
+        validated_signal
+      rescue StandardError => e
+        @logger.debug("[AlertJob] validate_signal_for_grouping error: #{e.message}")
+        nil
       end
 
       # Validate a signal with all checks
@@ -607,6 +725,67 @@ module ArbitrageBot
         @spread_history_tracker.start_tracking(symbol)
       rescue StandardError => e
         @logger.error("[AlertJob] Failed to start convergence tracking: #{e.message}")
+      end
+
+      # Extract spread percentage from signal
+      # Handles both nested format (spread: { real_pct: }) and top-level (spread_pct:)
+      # @param signal [Hash]
+      # @return [Float]
+      def extract_spread_pct(signal)
+        # Try nested format first (from orderbook analysis)
+        nested = signal['spread'] || signal[:spread]
+        if nested.is_a?(Hash)
+          return (nested['real_pct'] || nested[:real_pct]).to_f.abs
+        end
+
+        # Fall back to top-level spread_pct (from price monitor)
+        (signal['spread_pct'] || signal[:spread_pct]).to_f.abs
+      end
+
+      # Get max spread available for a symbol from spreads:latest
+      # @param symbol [String]
+      # @return [Float, nil] max spread percentage
+      def get_max_spread_for_symbol(symbol)
+        spreads_json = @redis.get('spreads:latest')
+        return nil unless spreads_json
+
+        spreads = JSON.parse(spreads_json)
+        symbol_spreads = spreads.select do |s|
+          s_symbol = (s['symbol'] || s[:symbol]).to_s.upcase
+          s_symbol == symbol.to_s.upcase
+        end
+
+        return nil if symbol_spreads.empty?
+
+        # Get max absolute spread
+        max_spread = symbol_spreads.map do |s|
+          (s['spread_pct'] || s[:spread_pct]).to_f.abs
+        end.max
+
+        max_spread
+      rescue StandardError => e
+        @logger.debug("[AlertJob] get_max_spread_for_symbol error: #{e.message}")
+        nil
+      end
+
+      # Re-queue a signal for later processing (to wait for better signal)
+      # Track requeue count to prevent infinite loops
+      # @param raw_signal [Hash]
+      def requeue_signal(raw_signal)
+        requeue_count = (raw_signal['requeue_count'] || raw_signal[:requeue_count] || 0).to_i
+
+        # Max 3 requeues to prevent infinite loops
+        if requeue_count >= 3
+          log("  Max requeues reached, processing anyway")
+          return false
+        end
+
+        raw_signal['requeue_count'] = requeue_count + 1
+        @redis.lpush(SIGNAL_QUEUE_KEY, raw_signal.to_json)
+        true
+      rescue StandardError => e
+        @logger.debug("[AlertJob] requeue_signal error: #{e.message}")
+        false
       end
     end
   end

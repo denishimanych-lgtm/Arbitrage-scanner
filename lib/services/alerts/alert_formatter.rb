@@ -113,9 +113,6 @@ module ArbitrageBot
           max_entry_usd = signal.liquidity[:max_entry_usd].to_f
           max_buy_usd = signal.liquidity[:max_buy_usd].to_f
           max_sell_usd = signal.liquidity[:max_sell_usd].to_f
-          low_bids = signal.liquidity[:low_bids_usd].to_f
-          high_asks = signal.liquidity[:high_asks_usd].to_f
-          exit_usd = signal.liquidity[:exit_usd].to_f
 
           # Position size: use suggested OR cap at max_entry (liquidity-limited)
           suggested = signal.suggested_position_usd.to_f
@@ -137,9 +134,6 @@ module ArbitrageBot
 
           # Profit estimate
           profit_usd = (position_usd * net_spread / 100).round(0)
-
-          # Exit liquidity ratio
-          exit_ratio = position_usd > 0 ? ((exit_usd / position_usd) * 100).round(0) : 0
 
           # Links
           buy_link = generate_link(signal.low_venue, signal.symbol)
@@ -172,10 +166,7 @@ module ArbitrageBot
             3. Ждать схождения до ~#{format_spread(target_spread)}%
             4. Закрыть обе позиции
 
-            💧 ЛИКВИДНОСТЬ ВЫХОДА:
-            • #{venue_short_name(signal.low_venue)} bids: $#{format_number(low_bids)}
-            • #{venue_short_name(signal.high_venue)} asks: $#{format_number(high_asks)}
-            • Позиция vs ликвидность: #{exit_ratio}% #{exit_ratio >= 100 ? "✅" : "⚠️"}
+            #{format_exit_liquidity_section(signal)}
 
             #{format_stats_section(symbol: signal.symbol, low_venue: signal.low_venue, high_venue: signal.high_venue, current_spread: current_spread)}🔗 ССЫЛКИ:
             • Buy: #{buy_link}
@@ -200,8 +191,6 @@ module ArbitrageBot
           max_entry_usd = signal.liquidity[:max_entry_usd].to_f
           max_buy_usd = signal.liquidity[:max_buy_usd].to_f
           max_sell_usd = signal.liquidity[:max_sell_usd].to_f
-          low_asks = signal.liquidity[:low_asks_usd].to_f || max_buy_usd
-          high_bids = signal.liquidity[:high_bids_usd].to_f || signal.liquidity[:low_bids_usd].to_f
 
           # Position size: use suggested OR cap at max_entry (liquidity-limited)
           suggested = signal.suggested_position_usd.to_f
@@ -288,15 +277,10 @@ module ArbitrageBot
             • Safety buffer: #{required_spread}%
             • Спред vs buffer: #{buffer_valid ? '✅' : '⚠️'} #{buffer_margin >= 0 ? '+' : ''}#{buffer_margin}%
 
-            #{format_transfer_status(signal)}📝 ИНСТРУКЦИЯ:
-            1. Купить $#{format_number(position_usd)} #{signal.symbol} на #{venue_short_name(signal.low_venue)} @ $#{format_price(buy_price)}
-            2. Перевести токены на #{venue_short_name(signal.high_venue)}
-            3. Продать $#{format_number(position_usd)} #{signal.symbol} @ $#{format_price(sell_price)}
-            ⚡ Действовать быстро - цена может измениться!
+            #{format_all_exchanges_transfer_status(signal.symbol)}📝 ИНСТРУКЦИЯ:
+            #{format_manual_instruction(signal, position_usd, buy_price, sell_price, is_spot_spot)}
 
-            💧 ЛИКВИДНОСТЬ:
-            • #{venue_short_name(signal.low_venue)} asks: $#{format_number(low_asks)} (покупка)
-            • #{venue_short_name(signal.high_venue)} bids: $#{format_number(high_bids)} (продажа)
+            #{format_exit_liquidity_section(signal, is_manual: true)}
 
             #{format_stats_section(symbol: signal.symbol, low_venue: signal.low_venue, high_venue: signal.high_venue, current_spread: current_spread)}🔗 ССЫЛКИ:
             • Buy: #{buy_link}
@@ -544,6 +528,59 @@ module ArbitrageBot
           end
         end
 
+        # Format liquidity value, showing N/A for unavailable data
+        def format_liquidity_usd(value)
+          value = value.to_f
+          return 'N/A' if value <= 0
+
+          "$#{format_number(value)}"
+        end
+
+        # Check if liquidity data is available (not zero)
+        def liquidity_available?(signal)
+          exit_usd = signal.liquidity[:exit_usd].to_f rescue 0
+          low_bids = signal.liquidity[:low_bids_usd].to_f rescue 0
+          high_asks = signal.liquidity[:high_asks_usd].to_f rescue 0
+
+          exit_usd > 0 || low_bids > 0 || high_asks > 0
+        end
+
+        # Format exit liquidity section with N/A handling
+        def format_exit_liquidity_section(signal, is_manual: false)
+          low_bids = signal.liquidity[:low_bids_usd].to_f rescue 0
+          high_asks = signal.liquidity[:high_asks_usd].to_f rescue 0
+          exit_usd = signal.liquidity[:exit_usd].to_f rescue 0
+          position_usd = signal.suggested_position_usd.to_f
+
+          # Check if this is a fallback signal (no orderbook data)
+          is_fallback = signal.respond_to?(:fallback_signal) ? signal.fallback_signal : false
+
+          if low_bids <= 0 && high_asks <= 0
+            if is_fallback
+              <<~SECTION.strip
+                💧 EXIT ЛИКВИДНОСТЬ: N/A
+                   ⚠️ Ордербук недоступен (fallback сигнал)
+              SECTION
+            else
+              <<~SECTION.strip
+                💧 EXIT ЛИКВИДНОСТЬ: N/A
+                   ⚠️ Данные ордербука отсутствуют
+              SECTION
+            end
+          else
+            exit_ratio = position_usd > 0 ? ((exit_usd / position_usd) * 100).round(0) : 0
+            low_label = is_manual ? '(продать обратно)' : ''
+            high_label = is_manual ? '(откупить)' : ''
+
+            <<~SECTION.strip
+              💧 EXIT ЛИКВИДНОСТЬ:
+              • #{venue_short_name(signal.low_venue)} bids: #{format_liquidity_usd(low_bids)} #{low_label}
+              • #{venue_short_name(signal.high_venue)} asks: #{format_liquidity_usd(high_asks)} #{high_label}
+              • Позиция vs ликвидность: #{exit_ratio}% #{exit_ratio >= 100 ? '✅' : '⚠️'}
+            SECTION
+          end
+        end
+
         def format_spread(spread)
           spread.to_f.round(2)
         end
@@ -558,6 +595,44 @@ module ArbitrageBot
             tokens.round(2).to_s
           else
             tokens.round(6).to_s
+          end
+        end
+
+        # Format instruction based on venue types
+        # spot-spot: transfer tokens
+        # futures involved: need tokens on sell side (can't transfer from futures)
+        def format_manual_instruction(signal, position_usd, buy_price, sell_price, is_spot_spot)
+          low_name = venue_short_name(signal.low_venue)
+          high_name = venue_short_name(signal.high_venue)
+          low_type = venue_type(signal.low_venue)
+          high_type = venue_type(signal.high_venue)
+
+          if is_spot_spot
+            # Spot-spot: can transfer tokens
+            <<~INST.strip
+              1. Купить $#{format_number(position_usd)} #{signal.symbol} на #{low_name} @ $#{format_price(buy_price)}
+              2. Вывести токены (withdraw) с #{low_name}
+              3. Депозит токенов на #{high_name}
+              4. Продать $#{format_number(position_usd)} #{signal.symbol} @ $#{format_price(sell_price)}
+              ⚡ Действовать быстро - цена может измениться!
+            INST
+          elsif low_type == :cex_futures || low_type == :perp_dex
+            # Buying on futures, selling on spot - need tokens on sell side
+            <<~INST.strip
+              ⚠️ С фьючерсов нельзя перевести токены!
+              1. Уже иметь токены #{signal.symbol} на #{high_name}
+              2. Открыть LONG $#{format_number(position_usd)} на #{low_name} @ $#{format_price(buy_price)}
+              3. Продать токены на #{high_name} @ $#{format_price(sell_price)}
+              4. При сходимости: закрыть фьючерс + откупить токены
+            INST
+          else
+            # Buying on spot, selling on futures - just need margin
+            <<~INST.strip
+              1. Купить $#{format_number(position_usd)} #{signal.symbol} на #{low_name} @ $#{format_price(buy_price)}
+              2. Открыть SHORT $#{format_number(position_usd)} на #{high_name} @ $#{format_price(sell_price)}
+              3. При сходимости: продать спот + закрыть шорт
+              💡 Хеджированная позиция, низкий риск
+            INST
           end
         end
 
@@ -586,6 +661,34 @@ module ArbitrageBot
           end
 
           lines.join("\n            ") + "\n\n            "
+        end
+
+        # Compact transfer status for all CEX exchanges (one line per exchange)
+        # Shows W:✅/❌ D:✅/❌ for each exchange
+        def format_all_exchanges_transfer_status(symbol)
+          checker = Safety::DepositWithdrawChecker.new
+          exchanges = %w[binance bybit okx gate mexc kucoin htx bitget]
+
+          statuses = []
+          exchanges.each do |exchange|
+            result = checker.check_status(symbol, exchange)
+            next if result[:error]
+
+            w = result[:withdraw_enabled]
+            d = result[:deposit_enabled]
+
+            w_icon = w == true ? '✅' : (w == false ? '❌' : '❓')
+            d_icon = d == true ? '✅' : (d == false ? '❌' : '❓')
+
+            statuses << "#{exchange.capitalize}: W:#{w_icon} D:#{d_icon}"
+          end
+
+          return "" if statuses.empty?
+
+          "🔄 ПЕРЕВОДЫ: #{statuses.join(' | ')}\n\n            "
+        rescue StandardError => e
+          ArbitrageBot.logger.debug("[AlertFormatter] format_all_exchanges_transfer_status error: #{e.message}")
+          ""
         end
 
         def format_enabled_status(enabled)
@@ -673,7 +776,8 @@ module ArbitrageBot
         end
 
         def format_timestamp(timestamp)
-          Time.at(timestamp).utc.strftime('%H:%M:%S')
+          # Use Moscow timezone (UTC+3)
+          Time.at(timestamp).getlocal('+03:00').strftime('%H:%M:%S')
         end
 
         def format_latency(timing)

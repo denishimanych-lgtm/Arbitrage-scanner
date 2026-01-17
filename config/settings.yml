@@ -24,6 +24,7 @@ default: &default
   max_slippage_pct: 2.0
   max_latency_ms: 5000
   max_spread_age_sec: 60
+  max_signal_age_sec: 300  # Allow signals up to 5 min old (queue backlog)
   max_spread_age_hours: 24
   min_depth_vs_history_ratio: 0.3
   warning_depth_ratio: 0.5

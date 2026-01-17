@@ -40,9 +40,11 @@ module ArbitrageBot
 
         # Check prices and generate alerts
         # @param prices [Array<Hash>] price data from DepegMonitor
+        # @param history_tracker [DepegHistoryTracker, nil] for including stats
         # @return [Array<Hash>] generated alerts
-        def check_and_alert(prices)
+        def check_and_alert(prices, history_tracker: nil)
           alerts = []
+          @history_tracker = history_tracker
 
           prices.each do |price_data|
             next unless should_alert?(price_data)
@@ -146,6 +148,9 @@ module ArbitrageBot
           # Get Curve 3pool status
           curve_section = get_curve_section(symbol)
 
+          # Get history statistics
+          history_section = get_history_section(symbol, deviation)
+
           # Get trading links
           links_section = format_trading_links(symbol)
 
@@ -158,6 +163,7 @@ module ArbitrageBot
                Отклонение: #{dev_str}
                Источник: #{price_data[:source]}
 
+            #{history_section}
             #{curve_section}
             💰 ПОЗИЦИЯ ($#{format_number(position_usd)}):
             • #{format_tokens(position_tokens)} #{symbol} @ $#{format_price(price)}
@@ -171,8 +177,8 @@ module ArbitrageBot
             #{strategy_instructions(symbol, price, is_severe, position_tokens)}
 
             📍 ВЫХОД:
-            • Take profit: цена > $0.995
-            • Stop loss: -#{is_severe ? '5' : '3'}% от входа
+            • Take profit: $0.995 (+#{((0.995 - price) / price * 100).round(2)}%)
+            • Stop loss: $#{(price * (is_severe ? 0.95 : 0.97)).round(4)} (-#{is_severe ? '5' : '3'}%)
             #{is_severe ? '⚠️ EXTREME CAUTION - возможен полный коллапс!' : ''}
 
             #{links_section}
@@ -210,14 +216,21 @@ module ArbitrageBot
             strategy: 'stablecoin_depeg',
             class: 'speculative',
             symbol: alert[:symbol],
-            details: alert.except(:message)
+            details: alert.except(:message).merge(
+              entry_price: alert[:price],
+              tp_price: 0.995,
+              sl_price: alert[:price] * (alert[:type] == :severe_depeg ? 0.95 : 0.97)
+            )
           )
 
           signal_id = db_signal ? Analytics::SignalRepository.short_id(db_signal[:id], 'stablecoin_depeg') : nil
           message = alert[:message]
-          message = "#{message}\n\nID: `#{signal_id}`\n/taken #{signal_id}" if signal_id
+          message = "#{message}\n\nID: `#{signal_id}`" if signal_id
 
-          result = @notifier.send_alert(message)
+          # Build inline keyboard with "Enter Position" button
+          keyboard = build_enter_position_keyboard(signal_id) if signal_id
+
+          result = @notifier.send_alert(message, reply_markup: keyboard)
 
           if result && db_signal && result.is_a?(Hash) && result['result']
             msg_id = result.dig('result', 'message_id')
@@ -228,6 +241,18 @@ module ArbitrageBot
         rescue StandardError => e
           @logger.error("[DepegAlerter] send_alert error: #{e.message}")
           nil
+        end
+
+        def build_enter_position_keyboard(signal_id)
+          return nil unless signal_id
+
+          callback_data = Telegram::CallbackData.encode(:act, :enter_depeg, signal_id[0..7])
+
+          {
+            inline_keyboard: [
+              [{ text: '📈 Вступил в позицию', callback_data: callback_data }]
+            ]
+          }
         end
 
         def status_emoji(status)
@@ -250,6 +275,15 @@ module ArbitrageBot
           "#{curve_status}\n\n"
         rescue StandardError => e
           @logger.debug("[DepegAlerter] get_curve_section error: #{e.message}")
+          ""
+        end
+
+        def get_history_section(symbol, current_deviation = nil)
+          return "" unless @history_tracker
+
+          @history_tracker.format_stats_for_alert(symbol, current_deviation: current_deviation)
+        rescue StandardError => e
+          @logger.debug("[DepegAlerter] get_history_section error: #{e.message}")
           ""
         end
 

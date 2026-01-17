@@ -100,6 +100,13 @@ module ArbitrageBot
         coingecko.com
         vertex
         api.pro.coinbase.com
+        okx.com
+        mexc.com
+        bybit.com
+        htx.com
+        bitget.com
+        kucoin.com
+        gate.io
       ].freeze
 
       # Hosts that need IPv4 workaround due to IPv6 connectivity issues

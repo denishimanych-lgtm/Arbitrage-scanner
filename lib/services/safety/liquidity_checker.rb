@@ -57,11 +57,36 @@ module ArbitrageBot
           checks = []
           warnings = []
 
-          # 1. Exit liquidity check
-          checks << check_exit_liquidity(signal)
+          # Check if this is a fallback signal (reduced confidence, no orderbook data)
+          is_fallback = signal[:fallback_signal] || signal['fallback_signal'] ||
+                        (signal[:type] || signal['type']) == :fallback ||
+                        (signal[:type] || signal['type']) == 'fallback'
 
-          # 2. Position ratio check (position vs exit liquidity)
-          checks << check_position_ratio(signal)
+          # 1. Exit liquidity check - skip for fallback signals
+          if is_fallback
+            checks << CheckResult.new(
+              passed: true,
+              check_name: :exit_liquidity,
+              message: 'Liquidity check skipped (fallback signal)',
+              value: nil,
+              threshold: @settings[:min_exit_liquidity_usd]
+            )
+          else
+            checks << check_exit_liquidity(signal)
+          end
+
+          # 2. Position ratio check (position vs exit liquidity) - skip for fallback
+          if is_fallback
+            checks << CheckResult.new(
+              passed: true,
+              check_name: :position_ratio,
+              message: 'Position ratio check skipped (fallback signal)',
+              value: nil,
+              threshold: @settings[:max_position_to_exit_ratio]
+            )
+          else
+            checks << check_position_ratio(signal)
+          end
 
           # 3. Slippage check
           checks << check_max_slippage(signal)
@@ -69,10 +94,20 @@ module ArbitrageBot
           # 4. Latency check
           checks << check_latency(signal)
 
-          # 5. Depth vs history check
-          depth_check = check_depth_vs_history(signal)
-          checks << depth_check
-          warnings << depth_check if depth_check.passed && depth_check.value && depth_check.value < @settings[:warning_depth_ratio]
+          # 5. Depth vs history check - skip for fallback signals
+          if is_fallback
+            checks << CheckResult.new(
+              passed: true,
+              check_name: :depth_vs_history,
+              message: 'Depth check skipped (fallback signal)',
+              value: nil,
+              threshold: @settings[:min_depth_vs_history_ratio]
+            )
+          else
+            depth_check = check_depth_vs_history(signal)
+            checks << depth_check
+            warnings << depth_check if depth_check.passed && depth_check.value && depth_check.value < @settings[:warning_depth_ratio]
+          end
 
           # 6. Spread age check (how long spread has persisted)
           checks << check_spread_age(signal)

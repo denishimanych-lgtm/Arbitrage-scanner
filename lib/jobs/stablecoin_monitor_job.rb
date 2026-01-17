@@ -17,6 +17,7 @@ module ArbitrageBot
         @logger = ArbitrageBot.logger
         @monitor = Services::Stablecoin::DepegMonitor.new
         @alerter = Services::Stablecoin::DepegAlerter.new(settings)
+        @history_tracker = Services::Stablecoin::DepegHistoryTracker.new
         @notifier = Services::Telegram::TelegramNotifier.new
         @interval = settings[:stablecoin_interval_seconds] || DEFAULT_INTERVAL_SECONDS
         @running = false
@@ -29,14 +30,21 @@ module ArbitrageBot
         prices = @monitor.fetch_all
         log("Fetched #{prices.size} stablecoin prices")
 
+        # Record to history tracker
+        @history_tracker.record(prices)
+
         # Check for depegs and alert
         depegged = prices.select { |p| @monitor.depegged?(p[:price]) }
         if depegged.any?
           log("Found #{depegged.size} depegged stablecoins: #{depegged.map { |p| p[:symbol] }.join(', ')}")
         end
 
-        alerts = @alerter.check_and_alert(prices)
+        # Pass history tracker to alerter for stats in alerts
+        alerts = @alerter.check_and_alert(prices, history_tracker: @history_tracker)
         log("Generated #{alerts.size} alerts") if alerts.any?
+
+        # Check active DEPEG positions for TP/SL
+        check_depeg_positions(prices)
 
         # Check Curve 3pool stress (early warning)
         curve_alerts = check_curve_stress
@@ -241,6 +249,90 @@ module ArbitrageBot
 
       def log(message)
         @logger.info("[StablecoinMonitorJob] #{message}")
+      end
+
+      # Check active DEPEG positions for TP/SL conditions
+      def check_depeg_positions(prices)
+        redis = ArbitrageBot.redis
+        active_keys = redis.smembers('depeg_positions:active') || []
+
+        return if active_keys.empty?
+
+        prices_by_symbol = prices.to_h { |p| [p[:symbol], p] }
+
+        active_keys.each do |key|
+          data = redis.get(key)
+          next unless data
+
+          position = JSON.parse(data, symbolize_names: true)
+          symbol = position[:symbol]
+          current_price_data = prices_by_symbol[symbol]
+
+          next unless current_price_data
+
+          current_price = current_price_data[:price]
+          entry_price = position[:entry_price].to_f
+          tp_price = position[:tp_price].to_f
+          sl_price = position[:sl_price].to_f
+          user_id = position[:user_id]
+
+          # Check if TP or SL reached
+          if current_price >= tp_price
+            send_depeg_close_alert(position, current_price, :tp)
+            redis.srem('depeg_positions:active', key)
+            redis.del(key)
+          elsif current_price <= sl_price
+            send_depeg_close_alert(position, current_price, :sl)
+            redis.srem('depeg_positions:active', key)
+            redis.del(key)
+          end
+        rescue StandardError => e
+          @logger.error("[StablecoinMonitorJob] check_depeg_positions error: #{e.message}")
+        end
+      end
+
+      # Send DEPEG position close alert
+      def send_depeg_close_alert(position, current_price, reason)
+        entry_price = position[:entry_price].to_f
+        pnl_pct = ((current_price - entry_price) / entry_price * 100).round(2)
+        entered_at = Time.at(position[:entered_at].to_i)
+        duration = format_duration(entered_at)
+
+        emoji = reason == :tp ? '🎯' : '🛑'
+        reason_text = reason == :tp ? 'TAKE PROFIT ДОСТИГНУТ' : 'STOP LOSS ДОСТИГНУТ'
+
+        message = <<~MSG
+          #{emoji} #{reason_text} | #{position[:symbol]}
+          ━━━━━━━━━━━━━━━━━━━━━━━━━
+
+          Entry: $#{entry_price.round(4)}
+          Exit: $#{current_price.round(4)}
+          PnL: #{pnl_pct >= 0 ? '+' : ''}#{pnl_pct}%
+
+          ⏰ В позиции: #{duration}
+
+          #{reason == :tp ? '💰 Прибыль зафиксирована!' : '⚠️ Убыток ограничен.'}
+        MSG
+
+        @notifier.send_to_user(position[:user_id], message.strip)
+      rescue StandardError => e
+        @logger.error("[StablecoinMonitorJob] send_depeg_close_alert error: #{e.message}")
+      end
+
+      def format_duration(entered_at)
+        seconds = (Time.now - entered_at).to_i
+        if seconds < 60
+          "#{seconds} сек"
+        elsif seconds < 3600
+          "#{(seconds / 60).round(0)} мин"
+        elsif seconds < 86_400
+          hours = (seconds / 3600).floor
+          mins = ((seconds % 3600) / 60).round(0)
+          mins > 0 ? "#{hours}ч #{mins}м" : "#{hours}ч"
+        else
+          days = (seconds / 86_400).round(1)
+          "#{days}д"
+        end
       end
     end
   end

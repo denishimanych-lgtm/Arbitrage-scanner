@@ -567,6 +567,19 @@ module ArbitrageBot
               handle_enter_position
             when :close_pos
               handle_close_position
+            when :enter_depeg
+              handle_enter_depeg_position
+            when :close_depeg
+              handle_close_depeg_position
+            # Digest mode actions
+            when :track_coin
+              handle_track_coin
+            when :untrack_coin
+              handle_untrack_coin
+            when :digest_more
+              handle_digest_more
+            when :digest_stats
+              handle_digest_stats
             else
               answer("Unknown action: #{@parsed[:target]}")
             end
@@ -635,6 +648,80 @@ module ArbitrageBot
             edit_message(text, { inline_keyboard: [] })
           end
 
+          # Handle "Вступил в позицию" for DEPEG signals
+          def handle_enter_depeg_position
+            short_signal_id = @parsed[:params][0]
+            return answer('Signal ID missing') unless short_signal_id
+
+            # Find the signal
+            signal = find_signal_by_short_id(short_signal_id)
+            unless signal
+              return answer('Сигнал не найден')
+            end
+
+            # Get entry price, TP, SL from signal details
+            details = signal[:details] || {}
+            entry_price = details['entry_price'] || details['price']
+            tp_price = details['tp_price'] || 0.995
+            sl_price = details['sl_price'] || (entry_price.to_f * 0.97)
+
+            # Store depeg position tracking in Redis
+            position_key = "depeg_position:#{@chat_id}:#{short_signal_id}"
+            position_data = {
+              signal_id: signal[:id],
+              symbol: signal[:symbol],
+              entry_price: entry_price,
+              tp_price: tp_price,
+              sl_price: sl_price,
+              entered_at: Time.now.to_i,
+              user_id: @chat_id
+            }
+
+            ArbitrageBot.redis.setex(position_key, 7 * 24 * 3600, JSON.generate(position_data))
+
+            # Also store in active list for monitoring
+            ArbitrageBot.redis.sadd('depeg_positions:active', position_key)
+
+            answer('✅ Позиция добавлена в отслеживание!')
+
+            # Update message - remove button, add position info
+            new_text = "#{@message_id ? '' : ''}✅ Вы в позиции!\n\n" \
+                       "📊 #{signal[:symbol]}\n" \
+                       "Entry: $#{entry_price.to_f.round(4)}\n" \
+                       "TP: $#{tp_price.to_f.round(4)}\n" \
+                       "SL: $#{sl_price.to_f.round(4)}\n\n" \
+                       "Буду отслеживать и сообщу при достижении TP/SL."
+
+            close_keyboard = {
+              inline_keyboard: [
+                [{ text: '❌ Закрыл позицию', callback_data: CallbackData.encode(:act, :close_depeg, short_signal_id) }]
+              ]
+            }
+
+            begin
+              edit_message(new_text, close_keyboard)
+            rescue StandardError
+              # If edit fails, just answer
+            end
+          end
+
+          # Handle closing DEPEG position
+          def handle_close_depeg_position
+            short_signal_id = @parsed[:params][0]
+            return answer('Signal ID missing') unless short_signal_id
+
+            position_key = "depeg_position:#{@chat_id}:#{short_signal_id}"
+
+            # Remove from active set and delete key
+            ArbitrageBot.redis.srem('depeg_positions:active', position_key)
+            ArbitrageBot.redis.del(position_key)
+
+            answer('✅ Позиция закрыта!')
+
+            # Update message
+            edit_message("✅ Позиция закрыта", { inline_keyboard: [] })
+          end
+
           # Find signal by short ID (first 8 chars)
           def find_signal_by_short_id(short_id)
             sql = <<~SQL
@@ -699,6 +786,138 @@ module ArbitrageBot
           def handle_confirm
             # Placeholder for destructive action confirmations
             answer('Action confirmed')
+          end
+
+          # ========== DIGEST MODE HANDLERS ==========
+
+          # Enable real-time mode for a coin (from digest button)
+          def handle_track_coin
+            symbol = @parsed[:params][0]
+            return answer('Symbol missing') unless symbol
+
+            symbol = symbol.upcase
+            mode_manager = Alerts::CoinModeManager.new
+
+            # Enable real-time for 3 days
+            mode_manager.enable_realtime(symbol, duration: 3 * 24 * 3600)
+
+            answer("✅ #{symbol} в real-time режиме (3 дня)")
+
+            # Send confirmation message with untrack button
+            text = <<~MSG
+              🔔 REAL-TIME РЕЖИМ | #{symbol}
+              ━━━━━━━━━━━━━━━━━━━━━━━━
+
+              Теперь алерты по #{symbol} приходят сразу.
+
+              📊 Отслеживание: 3 дня
+              ⏰ До: #{(Time.now + 3 * 24 * 3600).strftime('%d.%m %H:%M')}
+
+              💡 Нажми кнопку ниже чтобы вернуть в дайджест.
+            MSG
+
+            keyboard = {
+              inline_keyboard: [
+                [{ text: "📤 Вернуть #{symbol} в дайджест",
+                   callback_data: CallbackData.encode(:act, :untrack_coin, symbol) }]
+              ]
+            }
+
+            @notifier.send_alert(text, reply_markup: keyboard)
+          end
+
+          # Disable real-time mode (return to digest)
+          def handle_untrack_coin
+            symbol = @parsed[:params][0]
+            return answer('Symbol missing') unless symbol
+
+            symbol = symbol.upcase
+            mode_manager = Alerts::CoinModeManager.new
+
+            # Get convergence analysis before disabling
+            analysis = mode_manager.analyze_convergence(symbol)
+
+            mode_manager.disable_realtime(symbol)
+
+            answer("✅ #{symbol} возвращён в дайджест")
+
+            # Show convergence summary if we have data
+            if analysis[:observations] > 0
+              converged = analysis[:converged] ? '✅ Да' : '❌ Нет'
+              text = <<~MSG
+                📤 #{symbol} → ДАЙДЖЕСТ
+                ━━━━━━━━━━━━━━━━━━━━━━━━
+
+                📊 ИТОГИ ОТСЛЕЖИВАНИЯ:
+                • Наблюдений: #{analysis[:observations]}
+                • Min спред: #{analysis[:min_spread]}%
+                • Max спред: #{analysis[:max_spread]}%
+                • Сходился < 1%: #{converged}
+
+                Теперь #{symbol} будет в 15-мин дайджестах.
+              MSG
+
+              @notifier.send_message(text)
+            end
+
+            # Update the original message
+            edit_message("📤 #{symbol} возвращён в дайджест", { inline_keyboard: [] })
+          end
+
+          # Show more coins from digest (pagination)
+          def handle_digest_more
+            answer('Показываю все монеты...')
+
+            mode_manager = Alerts::CoinModeManager.new
+            accumulator = Alerts::DigestAccumulator.new
+
+            # Get current accumulated signals
+            signals = accumulator.get_current_window
+
+            if signals.empty?
+              @notifier.send_message("Нет накопленных сигналов")
+              return
+            end
+
+            # Format all coins list
+            lines = ["📋 ВСЕ МОНЕТЫ В ДАЙДЖЕСТЕ (#{signals.size})\n━━━━━━━━━━━━━━━━━━━━━━━━\n"]
+
+            sorted = signals.keys.sort_by { |s| -(signals[s].values.map { |d| d[:spread_pct] }.max || 0) }
+
+            sorted.each_with_index do |symbol, idx|
+              data = signals[symbol]
+              best_spread = data.values.map { |d| d[:spread_pct] }.max.round(1)
+              categories = data.keys.map(&:to_s).map(&:upcase).join(',')
+
+              realtime = mode_manager.realtime?(symbol) ? ' 🔔' : ''
+              lines << "#{idx + 1}. #{symbol}: #{best_spread}% (#{categories})#{realtime}"
+            end
+
+            @notifier.send_message(lines.join("\n"))
+          end
+
+          # Show digest statistics
+          def handle_digest_stats
+            mode_manager = Alerts::CoinModeManager.new
+            stats = mode_manager.stats
+
+            text = <<~MSG
+              📊 СТАТИСТИКА ДАЙДЖЕСТА
+              ━━━━━━━━━━━━━━━━━━━━━━━━
+
+              🔔 Real-time монет: #{stats[:realtime_count]}
+              #{stats[:realtime_coins].any? ? "   • #{stats[:realtime_coins].join(', ')}" : ''}
+
+              📋 Tracking info:
+            MSG
+
+            stats[:tracking_info].each do |info|
+              remaining_h = (info[:remaining] / 3600.0).round(1)
+              text += "   • #{info[:symbol]}: #{remaining_h}ч осталось\n"
+            end
+
+            @notifier.send_message(text)
+            answer('Stats shown')
           end
 
           # Helper methods

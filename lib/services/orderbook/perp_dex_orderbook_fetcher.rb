@@ -5,9 +5,11 @@ module ArbitrageBot
     module Orderbook
       class PerpDexOrderbookFetcher
         DEFAULT_DEPTH = 20
+        CACHE_TTL = 60 # seconds - orderbook cache validity
+        CACHE_KEY_PREFIX = 'orderbook:dex:cache:'
 
         OrderbookData = Struct.new(
-          :symbol, :dex, :bids, :asks, :timestamp, :timing, :type,
+          :symbol, :dex, :bids, :asks, :timestamp, :timing, :type, :cached,
           keyword_init: true
         )
 
@@ -18,33 +20,55 @@ module ArbitrageBot
 
         def initialize
           @adapters = {}
+          @redis = ArbitrageBot.redis
+          @logger = ArbitrageBot.logger
         end
 
-        # Fetch orderbook
+        # Fetch orderbook with caching and fallback
         def fetch(dex, symbol, depth: DEFAULT_DEPTH)
+          cache_key = "#{CACHE_KEY_PREFIX}#{dex}:#{symbol}"
           adapter = get_adapter(dex)
 
-          request_at = Time.now
-          response = adapter.orderbook(symbol, depth: depth)
-          response_at = Time.now
+          begin
+            request_at = Time.now
+            response = adapter.orderbook(symbol, depth: depth)
+            response_at = Time.now
 
-          return nil unless response
+            return nil unless response
 
-          latency_ms = ((response_at - request_at) * 1000).round
+            latency_ms = ((response_at - request_at) * 1000).round
 
-          OrderbookData.new(
-            symbol: symbol,
-            dex: dex,
-            bids: response[:bids] || [],
-            asks: response[:asks] || [],
-            timestamp: response[:timestamp],
-            timing: TimingInfo.new(
-              request_at: request_at.to_f,
-              response_at: response_at.to_f,
-              latency_ms: latency_ms
-            ),
-            type: response[:type] || :standard
-          )
+            orderbook = OrderbookData.new(
+              symbol: symbol,
+              dex: dex,
+              bids: response[:bids] || [],
+              asks: response[:asks] || [],
+              timestamp: response[:timestamp],
+              timing: TimingInfo.new(
+                request_at: request_at.to_f,
+                response_at: response_at.to_f,
+                latency_ms: latency_ms
+              ),
+              type: response[:type] || :standard,
+              cached: false
+            )
+
+            # Cache successful response
+            cache_orderbook(cache_key, orderbook)
+
+            orderbook
+          rescue StandardError => e
+            @logger.warn("[PerpDexOrderbookFetcher] Fetch failed #{dex}/#{symbol}: #{e.message}, trying cache")
+
+            # Try cached data on failure
+            cached = get_cached_orderbook(cache_key, dex, symbol)
+            if cached
+              @logger.info("[PerpDexOrderbookFetcher] Using cached orderbook for #{dex}/#{symbol}")
+              cached
+            else
+              nil # DEX orderbooks return nil on failure instead of raising
+            end
+          end
         end
 
         # Fetch orderbooks from multiple DEXes in parallel
@@ -99,6 +123,50 @@ module ArbitrageBot
           return BigDecimal('0') if bid.zero?
 
           ((ask - bid) / bid * 100).round(4)
+        end
+
+        def cache_orderbook(key, orderbook)
+          data = {
+            symbol: orderbook.symbol,
+            dex: orderbook.dex,
+            bids: orderbook.bids.map { |b| [b[0].to_s, b[1].to_s] },
+            asks: orderbook.asks.map { |a| [a[0].to_s, a[1].to_s] },
+            timestamp: orderbook.timestamp,
+            type: orderbook.type.to_s,
+            cached_at: Time.now.to_i
+          }
+          @redis.setex(key, CACHE_TTL, JSON.generate(data))
+        rescue StandardError => e
+          @logger.debug("[PerpDexOrderbookFetcher] Cache write failed: #{e.message}")
+        end
+
+        def get_cached_orderbook(key, dex, symbol)
+          raw = @redis.get(key)
+          return nil unless raw
+
+          data = JSON.parse(raw)
+
+          # Check if cache is still fresh enough (within 2x TTL for fallback)
+          cached_at = data['cached_at'].to_i
+          return nil if Time.now.to_i - cached_at > CACHE_TTL * 2
+
+          OrderbookData.new(
+            symbol: symbol,
+            dex: dex,
+            bids: data['bids'].map { |b| [BigDecimal(b[0]), BigDecimal(b[1])] },
+            asks: data['asks'].map { |a| [BigDecimal(a[0]), BigDecimal(a[1])] },
+            timestamp: data['timestamp'],
+            timing: TimingInfo.new(
+              request_at: cached_at.to_f,
+              response_at: cached_at.to_f,
+              latency_ms: 0
+            ),
+            type: data['type']&.to_sym || :standard,
+            cached: true
+          )
+        rescue StandardError => e
+          @logger.debug("[PerpDexOrderbookFetcher] Cache read failed: #{e.message}")
+          nil
         end
       end
     end

@@ -64,24 +64,53 @@ module ArbitrageBot
 
         protected
 
+        MAX_RETRIES = 3
+        RETRY_DELAY = 0.5 # seconds
+
         def get(url, headers: {})
-          uri = URI.parse(url)
-          http = Support::SslConfig.create_http(uri, timeout: @http_timeout)
+          retries = 0
+          last_error = nil
 
-          request = Net::HTTP::Get.new(uri.request_uri)
-          headers.each { |k, v| request[k] = v }
+          while retries < MAX_RETRIES
+            begin
+              uri = URI.parse(url)
+              http = Support::SslConfig.create_http(uri, timeout: @http_timeout)
 
-          response = http.request(request)
+              request = Net::HTTP::Get.new(uri.request_uri)
+              headers.each { |k, v| request[k] = v }
 
-          unless response.is_a?(Net::HTTPSuccess)
-            raise ApiError, "HTTP #{response.code}: #{response.body[0..200]}"
+              response = http.request(request)
+
+              unless response.is_a?(Net::HTTPSuccess)
+                raise ApiError, "HTTP #{response.code}: #{response.body[0..200]}"
+              end
+
+              return JSON.parse(response.body)
+            rescue OpenSSL::SSL::SSLError => e
+              last_error = e
+              retries += 1
+              if retries < MAX_RETRIES
+                sleep(RETRY_DELAY * retries) # Exponential backoff
+              end
+            rescue Errno::ECONNRESET, Errno::ECONNREFUSED, Errno::EPIPE, EOFError => e
+              last_error = e
+              retries += 1
+              if retries < MAX_RETRIES
+                sleep(RETRY_DELAY * retries)
+              end
+            rescue JSON::ParserError => e
+              raise ApiError, "JSON parse error: #{e.message}"
+            rescue Net::OpenTimeout, Net::ReadTimeout => e
+              last_error = e
+              retries += 1
+              if retries < MAX_RETRIES
+                sleep(RETRY_DELAY * retries)
+              end
+            end
           end
 
-          JSON.parse(response.body)
-        rescue JSON::ParserError => e
-          raise ApiError, "JSON parse error: #{e.message}"
-        rescue Net::OpenTimeout, Net::ReadTimeout => e
-          raise ApiError, "Timeout: #{e.message}"
+          # All retries exhausted
+          raise ApiError, "Failed after #{MAX_RETRIES} retries: #{last_error&.message}"
         end
 
         def normalize_symbol(symbol)

@@ -52,10 +52,21 @@ module ArbitrageBot
 
         private
 
+        # Extract spread from signal - handles nested and top-level formats
+        def extract_spread(signal)
+          # Try nested format first (from orderbook analysis)
+          nested = signal['spread'] || signal[:spread]
+          if nested.is_a?(Hash)
+            return (nested['real_pct'] || nested[:real_pct]).to_f.abs
+          end
+
+          # Fall back to top-level spread_pct (from price monitor)
+          (signal['spread_pct'] || signal[:spread_pct]).to_f.abs
+        end
+
         def sort_by_spread(signals)
           signals.sort_by do |s|
-            spread = s['spread_pct'] || s[:spread_pct] || 0
-            -spread.to_f.abs
+            -extract_spread(s)
           end
         end
       end

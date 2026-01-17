@@ -204,16 +204,20 @@ module ArbitrageBot
           median = baseline[:median_spread] || baseline[:avg_spread]
 
           # Determine if current spread is anomaly
+          # Compare to actual historical max, not just percentile range
+          max_spread = baseline[:max_spread] || normal_high
+          is_new_high = current_spread > max_spread
           is_anomaly = current_spread > normal_high * 1.5
-          is_normal = current_spread <= normal_high * 1.2
           ratio = median > 0 ? (current_spread / median).round(1) : 0
 
-          status = if is_anomaly
+          status = if is_new_high
+                     "🔥 НОВЫЙ МАКСИМУМ (было #{max_spread.round(1)}%)"
+                   elsif is_anomaly
                      "⚠️ АНОМАЛИЯ - спред в #{ratio}x выше нормы!"
-                   elsif is_normal
-                     "ℹ️ В ПРЕДЕЛАХ НОРМЫ - спред может не сойтись"
+                   elsif current_spread > normal_high
+                     "📈 Выше нормы (#{ratio}x от медианы)"
                    else
-                     "📈 Выше среднего (#{ratio}x)"
+                     "ℹ️ В пределах нормы - спред может не сойтись"
                    end
 
           lines = [
