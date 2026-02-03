@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>Arbitrage Scanner</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: var(--tg-theme-bg-color, #1a1a2e);
+      color: var(--tg-theme-text-color, #eee);
+      min-height: 100vh;
+      padding: 12px;
+    }
+    .header { text-align: center; padding: 16px 0; border-bottom: 1px solid #444; margin-bottom: 16px; }
+    .header h1 { font-size: 20px; margin-bottom: 4px; }
+    .status { font-size: 12px; color: #888; }
+    .status.connected { color: #4ade80; }
+    .status.error { color: #f87171; }
+    .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 16px; }
+    .stat-card { background: var(--tg-theme-secondary-bg-color, #252540); border-radius: 8px; padding: 12px; text-align: center; }
+    .stat-value { font-size: 20px; font-weight: 700; }
+    .stat-label { font-size: 10px; color: #888; margin-top: 4px; }
+    .tabs { display: flex; gap: 8px; margin-bottom: 16px; overflow-x: auto; }
+    .tab { padding: 8px 16px; border-radius: 8px; background: var(--tg-theme-secondary-bg-color, #252540); border: none; color: #eee; font-size: 14px; cursor: pointer; }
+    .tab.active { background: var(--tg-theme-button-color, #3b82f6); color: #fff; }
+    .spread-list { display: flex; flex-direction: column; gap: 8px; }
+    .spread-card { background: var(--tg-theme-secondary-bg-color, #252540); border-radius: 12px; padding: 12px; }
+    .spread-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+    .symbol { font-weight: 600; font-size: 16px; }
+    .spread-pct { font-weight: 700; font-size: 18px; color: #4ade80; }
+    .spread-pct.high { color: #f59e0b; }
+    .spread-details { font-size: 12px; color: #888; }
+    .venues { display: flex; align-items: center; gap: 8px; margin-top: 4px; }
+    .venue { background: rgba(255,255,255,0.1); padding: 4px 8px; border-radius: 4px; font-size: 11px; }
+    .loading { text-align: center; padding: 40px; color: #888; }
+    .config-panel { background: #252540; border-radius: 8px; padding: 12px; margin-bottom: 16px; }
+    .config-panel input { width: 100%; padding: 8px; border-radius: 4px; border: 1px solid #444; background: #1a1a2e; color: #eee; margin-top: 8px; }
+    .config-panel button { margin-top: 8px; padding: 8px 16px; background: #3b82f6; color: #fff; border: none; border-radius: 4px; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1>Arbitrage Scanner</h1>
+    <div class="status" id="status">Initializing...</div>
+  </div>
+
+  <div class="config-panel" id="config-panel" style="display:none;">
+    <div style="font-size:12px;color:#888;">API URL (for local testing):</div>
+    <input type="text" id="api-url" placeholder="https://your-tunnel-url.com">
+    <button onclick="saveApiUrl()">Connect</button>
+  </div>
+
+  <div class="stats">
+    <div class="stat-card">
+      <div class="stat-value" id="total-spreads">-</div>
+      <div class="stat-label">Spreads</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-value" id="best-spread">-</div>
+      <div class="stat-label">Best %</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-value" id="price-age">-</div>
+      <div class="stat-label">Age (s)</div>
+    </div>
+  </div>
+
+  <div class="tabs">
+    <button class="tab active" data-filter="all">All</button>
+    <button class="tab" data-filter="SF">Spot-Fut</button>
+    <button class="tab" data-filter="SS">Spot-Spot</button>
+    <button class="tab" data-filter="FF">Fut-Fut</button>
+  </div>
+
+  <div class="spread-list" id="spread-list">
+    <div class="loading">Loading...</div>
+  </div>
+
+  <script>
+    var API_URL = localStorage.getItem('api_url') || '';
+    var tg = window.Telegram && window.Telegram.WebApp;
+    var spreads = [];
+    var currentFilter = 'all';
+
+    if (tg) {
+      tg.ready();
+      tg.expand();
+    }
+
+    function init() {
+      var statusEl = document.getElementById('status');
+
+      if (!API_URL) {
+        statusEl.textContent = 'API not configured';
+        statusEl.className = 'status error';
+        document.getElementById('config-panel').style.display = 'block';
+        document.getElementById('spread-list').innerHTML = '<div class="loading">Configure API URL to see spreads</div>';
+        return;
+      }
+
+      loadSpreads();
+      setupTabs();
+      setInterval(loadSpreads, 30000);
+    }
+
+    function saveApiUrl() {
+      var url = document.getElementById('api-url').value.trim();
+      if (url) {
+        localStorage.setItem('api_url', url);
+        API_URL = url;
+        document.getElementById('config-panel').style.display = 'none';
+        init();
+      }
+    }
+
+    function loadSpreads() {
+      var statusEl = document.getElementById('status');
+      var listEl = document.getElementById('spread-list');
+
+      statusEl.textContent = 'Loading...';
+      statusEl.className = 'status';
+
+      Promise.all([
+        fetch(API_URL + '/api/spreads').then(function(r) { return r.json(); }),
+        fetch(API_URL + '/api/status').then(function(r) { return r.json(); })
+      ]).then(function(results) {
+        var spreadsData = results[0];
+        var statusData = results[1];
+        spreads = spreadsData.spreads || [];
+
+        document.getElementById('total-spreads').textContent = spreadsData.total || 0;
+        document.getElementById('best-spread').textContent = spreads.length > 0 ? spreads[0].spread_pct.toFixed(1) + '%' : '-';
+        document.getElementById('price-age').textContent = statusData.price_age_seconds || '-';
+
+        statusEl.textContent = 'Connected • ' + spreads.length + ' spreads';
+        statusEl.className = 'status connected';
+        renderSpreads();
+      }).catch(function(err) {
+        statusEl.textContent = 'Connection error';
+        statusEl.className = 'status error';
+        listEl.innerHTML = '<div class="loading" style="color:#f87171;">Failed: ' + err.message + '</div>';
+        document.getElementById('config-panel').style.display = 'block';
+      });
+    }
+
+    function renderSpreads() {
+      var listEl = document.getElementById('spread-list');
+      var filtered = currentFilter === 'all' ? spreads : spreads.filter(function(s) { return getStrategy(s) === currentFilter; });
+
+      if (filtered.length === 0) {
+        listEl.innerHTML = '<div class="loading">No spreads found</div>';
+        return;
+      }
+
+      listEl.innerHTML = filtered.slice(0, 50).map(function(s) {
+        var pct = s.spread_pct ? s.spread_pct.toFixed(2) : '0';
+        var cls = s.spread_pct > 20 ? 'high' : '';
+        return '<div class="spread-card"><div class="spread-header"><span class="symbol">' + s.symbol + '</span><span class="spread-pct ' + cls + '">' + pct + '%</span></div><div class="spread-details"><span>' + getStrategy(s) + '</span><div class="venues"><span class="venue">' + (s.low_venue ? s.low_venue.exchange : '?') + '</span><span>→</span><span class="venue">' + (s.high_venue ? s.high_venue.exchange : '?') + '</span></div></div></div>';
+      }).join('');
+    }
+
+    function getStrategy(s) {
+      var low = s.low_venue ? s.low_venue.type || '' : '';
+      var high = s.high_venue ? s.high_venue.type || '' : '';
+      if (low.indexOf('spot') >= 0 && high.indexOf('futures') >= 0) return 'SF';
+      if (low.indexOf('spot') >= 0 && high.indexOf('spot') >= 0) return 'SS';
+      if (low.indexOf('futures') >= 0 && high.indexOf('futures') >= 0) return 'FF';
+      return 'Other';
+    }
+
+    function setupTabs() {
+      var tabs = document.querySelectorAll('.tab');
+      tabs.forEach(function(tab) {
+        tab.addEventListener('click', function() {
+          tabs.forEach(function(t) { t.classList.remove('active'); });
+          this.classList.add('active');
+          currentFilter = this.dataset.filter;
+          renderSpreads();
+        });
+      });
+    }
+
+    init();
+  </script>
+</body>
+</html>
