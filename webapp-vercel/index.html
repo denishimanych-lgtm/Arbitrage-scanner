@@ -42,6 +42,16 @@
   </style>
 </head>
 <body>
+  <noscript><div style="color:white;padding:20px;">JavaScript disabled</div></noscript>
+  <div id="debug" style="background:red;color:white;padding:10px;display:none;"></div>
+  <div id="load-test" style="color:lime;padding:5px;font-size:10px;">HTML loaded OK</div>
+  <script>
+    window.onerror = function(msg, url, line) {
+      document.getElementById('debug').style.display = 'block';
+      document.getElementById('debug').textContent = 'Error: ' + msg + ' (line ' + line + ')';
+      return false;
+    };
+  </script>
   <div class="header">
     <h1>Arbitrage Scanner</h1>
     <div class="status" id="status">Initializing...</div>
