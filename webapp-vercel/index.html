@@ -123,9 +123,10 @@
       statusEl.textContent = 'Loading...';
       statusEl.className = 'status';
 
+      var fetchOpts = { headers: { 'ngrok-skip-browser-warning': 'true' } };
       Promise.all([
-        fetch(API_URL + '/api/spreads').then(function(r) { return r.json(); }),
-        fetch(API_URL + '/api/status').then(function(r) { return r.json(); })
+        fetch(API_URL + '/api/spreads', fetchOpts).then(function(r) { return r.json(); }),
+        fetch(API_URL + '/api/status', fetchOpts).then(function(r) { return r.json(); })
       ]).then(function(results) {
         var spreadsData = results[0];
         var statusData = results[1];
